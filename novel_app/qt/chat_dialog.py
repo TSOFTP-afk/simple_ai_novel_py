@@ -108,8 +108,9 @@ class ChatDialog(QDialog):
         input_layout = QVBoxLayout(input_box)
         input_layout.setContentsMargins(10, 10, 10, 10)
         self.input_editor = QPlainTextEdit()
-        self.input_editor.setPlaceholderText("输入你想问 AI 或角色的问题...")
+        self.input_editor.setPlaceholderText("输入你想问 AI 或角色的问题... (Enter 发送)")
         self.input_editor.setMaximumHeight(108)
+        self.input_editor.installEventFilter(self)
         input_layout.addWidget(self.input_editor)
 
         buttons = QHBoxLayout()
@@ -161,6 +162,14 @@ class ChatDialog(QDialog):
     def _on_character_changed(self) -> None:
         if self.current_thread is None:
             self.clear_history()
+
+    def eventFilter(self, obj, event) -> bool:
+        from PyQt6.QtCore import QEvent
+        if obj is self.input_editor and event.type() == QEvent.Type.KeyPress:
+            if event.key() == Qt.Key.Key_Return and not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+                self.send_message()
+                return True
+        return super().eventFilter(obj, event)
 
     def send_message(self) -> None:
         text = self.input_editor.toPlainText().strip()

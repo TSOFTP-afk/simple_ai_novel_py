@@ -15,8 +15,10 @@ from typing import Any
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-from PyQt6.QtCore import QByteArray, QEasingCurve, QPropertyAnimation, QSize, QTimer, Qt, QThread
-from PyQt6.QtGui import QAction, QBrush, QColor, QCloseEvent, QFont, QIcon, QImage, QKeySequence, QPainter, QPixmap, QShortcut, QTextCharFormat, QTextCursor, QStandardItem, QStandardItemModel
+from PyQt6.QtCore import QByteArray, QEasingCurve, QPropertyAnimation, QRectF, QSize, QSizeF, QTimer, Qt, QThread, QUrl
+from PyQt6.QtGui import QAction, QBrush, QColor, QCloseEvent, QFont, QIcon, QImage, QKeySequence, QMovie, QPainter, QPixmap, QShortcut, QTextCharFormat, QTextCursor, QStandardItem, QStandardItemModel
+from PyQt6.QtMultimedia import QMediaPlayer
+from PyQt6.QtMultimediaWidgets import QGraphicsVideoItem
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -24,12 +26,14 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
-    QDockWidget,
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGraphicsScene,
+    QGraphicsView,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -40,6 +44,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSlider,
     QSplitter,
@@ -58,7 +63,7 @@ from novel_app.exporter import BookExporter
 from novel_app.truth import TruthManager
 from novel_app.rag import ChapterRetriever
 from novel_app.model_router import ModelRouter
-from novel_app.qt.dialogs import AiSettingsDialog, ask_text, confirm, error, info, ask_unsaved
+from novel_app.qt.dialogs import AiSettingsDialog, ask_multiline, ask_text, confirm, error, info, ask_unsaved
 from novel_app.qt.helpers import (
     DEFAULT_AI_PROBABILITY_META,
     compute_template_stats,
@@ -78,8 +83,8 @@ from novel_app.qt.state import QtAppState
 from novel_app.qt.star_graph import StarGraphWidget, ask_relationship_type
 from novel_app.qt.theme import PRESET_THEMES, ThemeTokens, build_stylesheet, get_theme
 from novel_app.qt.workers import AiWorker, FunctionWorker
-from novel_app.research_sources import GITHUB_RESEARCH_POOL, render_research_note
 from novel_app.secure_storage import DPAPI_PREFIX, protect_secret, unprotect_secret
+from novel_app.spell_check import detect_chinese_typos
 from novel_app.text_importer import ParsedBook, parse_long_text
 
 try:
@@ -155,7 +160,7 @@ class ViewSettingsDialog(QDialog):
         self.setObjectName("ViewSettingsDialog")
         self.setWindowTitle("视图配置")
         self.setModal(True)
-        self.resize(760, 520)
+        self.resize(760, 560)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
@@ -248,6 +253,18 @@ class ViewSettingsDialog(QDialog):
         image_row.addWidget(clear_image)
         layout.addLayout(image_row)
 
+        video_row = QHBoxLayout()
+        video_row.addWidget(QLabel("底层视频"))
+        self.background_video_field = QLineEdit(str(settings.get("background_video", "")))
+        choose_video = QPushButton("选择视频/GIF")
+        clear_video = QPushButton("清除")
+        choose_video.clicked.connect(self._choose_video)
+        clear_video.clicked.connect(lambda: self.background_video_field.clear())
+        video_row.addWidget(self.background_video_field, 1)
+        video_row.addWidget(choose_video)
+        video_row.addWidget(clear_video)
+        layout.addLayout(video_row)
+
         filter_row = QHBoxLayout()
         filter_row.addWidget(QLabel("图片滤镜"))
         self.filter_combo = QComboBox()
@@ -263,6 +280,28 @@ class ViewSettingsDialog(QDialog):
         self.filter_strength.setValue(int(settings.get("background_filter_strength", 35) or 35))
         filter_row.addWidget(self.filter_strength, 1)
         layout.addLayout(filter_row)
+
+        font_row = QHBoxLayout()
+        font_row.addWidget(QLabel("正文字号"))
+        self.font_size_slider = QSlider(Qt.Orientation.Horizontal)
+        self.font_size_slider.setRange(10, 24)
+        self.font_size_slider.setValue(int(settings.get("editor_font_size", 14)))
+        self.font_size_label = QLabel(str(self.font_size_slider.value()))
+        self.font_size_slider.valueChanged.connect(lambda v: self.font_size_label.setText(str(v)))
+        font_row.addWidget(self.font_size_slider)
+        font_row.addWidget(self.font_size_label)
+        layout.addLayout(font_row)
+
+        line_row = QHBoxLayout()
+        line_row.addWidget(QLabel("行高"))
+        self.line_height_slider = QSlider(Qt.Orientation.Horizontal)
+        self.line_height_slider.setRange(100, 300)
+        self.line_height_slider.setValue(int(settings.get("editor_line_height", 145)))
+        self.line_height_label = QLabel(f"{self.line_height_slider.value() / 100:.2f}")
+        self.line_height_slider.valueChanged.connect(lambda v: self.line_height_label.setText(f"{v / 100:.2f}"))
+        line_row.addWidget(self.line_height_slider)
+        line_row.addWidget(self.line_height_label)
+        layout.addLayout(line_row)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         save_button = buttons.button(QDialogButtonBox.StandardButton.Save)
@@ -304,7 +343,7 @@ class ViewSettingsDialog(QDialog):
             extra += 160
         if self.ai_color_drawer.isVisible():
             extra += 180
-        self.resize(760, 520 + extra)
+        self.resize(760, 560 + extra)
 
     def _choose_color(self, key: str) -> None:
         current = QColor(self.color_fields[key].text().strip())
@@ -348,14 +387,27 @@ class ViewSettingsDialog(QDialog):
         if path:
             self.background_field.setText(path)
 
+    def _choose_video(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择底层视频/GIF",
+            "",
+            "Video & GIF Files (*.mp4 *.avi *.mkv *.webm *.mov *.gif *.webp *.apng);;All Files (*.*)",
+        )
+        if path:
+            self.background_video_field.setText(path)
+
     def values(self) -> dict[str, Any]:
         return {
             "theme_preset": str(self.preset_combo.currentData() or "light_blue"),
             "custom_theme_colors": {key: field.text().strip() for key, field in self.color_fields.items()},
             "ai_colors": normalize_ai_color_config(self.ai_color_values),
             "background_image": self.background_field.text().strip(),
+            "background_video": self.background_video_field.text().strip(),
             "background_filter": str(self.filter_combo.currentData() or "soft_dark"),
             "background_filter_strength": int(self.filter_strength.value()),
+            "editor_font_size": int(self.font_size_slider.value()),
+            "editor_line_height": int(self.line_height_slider.value()),
         }
 
 
@@ -416,6 +468,7 @@ class NovelQtMainWindow(QMainWindow):
         self.theme_preset = "light_blue"
         self.custom_theme_colors: dict[str, str] = {}
         self.background_image = ""
+        self.background_video = ""
         self.background_filter = "soft_dark"
         self.background_filter_strength = 35
         self.background_processed_image = ""
@@ -424,6 +477,9 @@ class NovelQtMainWindow(QMainWindow):
         self.library_width = 260
         self.library_auto_collapse_width = 132
         self.qt_drawer_width = 420
+        self.correction_ai_enabled = False
+        self.auto_save_enabled = False
+        self.auto_save_interval_seconds = 30
         self.focus_mode = False
         self._applying_library_layout = False
         self._tree_icon_cache: dict[tuple[str, str, str, str, str], Any] = {}
@@ -431,7 +487,6 @@ class NovelQtMainWindow(QMainWindow):
         self.loading_editor = False
         self.suppress_tree_selection = False
         self.current_tree_key: tuple[str, int | None, int | None] | None = None
-        self.navigation_history: list[tuple[tuple[str, int | None, int | None], str]] = []
         self.global_skills: list[dict[str, Any]] = []
         self.book_skills: list[dict[str, Any]] = []
         self.bound_skills: list[dict[str, Any]] = []
@@ -496,11 +551,16 @@ class NovelQtMainWindow(QMainWindow):
 
         self._load_ui_settings()
         self._load_ai_settings()
+        self.auto_save_timer = QTimer(self)
+        self.auto_save_timer.timeout.connect(self._auto_save_current)
         self._build_ui()
         self._apply_theme()
+        self._apply_background_video()
+        self._apply_editor_font_settings(self.ui_settings)
         self._restore_window_state()
         self._load_library_tree()
         self._setup_shortcuts()
+        self._sync_auto_save_timer()
 
     def _load_ui_settings(self) -> None:
         payload: dict[str, Any] = {}
@@ -517,6 +577,7 @@ class NovelQtMainWindow(QMainWindow):
         custom_colors = payload.get("custom_theme_colors", {})
         self.custom_theme_colors = dict(custom_colors) if isinstance(custom_colors, dict) else {}
         self.background_image = str(payload.get("background_image", ""))
+        self.background_video = str(payload.get("background_video", ""))
         self.background_filter = str(payload.get("background_filter", "soft_dark"))
         if self.background_filter not in {code for code, _label in BACKGROUND_FILTERS}:
             self.background_filter = "soft_dark"
@@ -528,6 +589,9 @@ class NovelQtMainWindow(QMainWindow):
         self.library_collapsed = bool(payload.get("library_collapsed", False))
         self.library_width = self._safe_int(payload.get("library_width", 260), 260, 180, 520)
         self.qt_drawer_width = self._safe_int(payload.get("qt_drawer_width", 420), 420, 320, 620)
+        self.correction_ai_enabled = bool(payload.get("correction_ai_enabled", False))
+        self.auto_save_enabled = bool(payload.get("auto_save_enabled", False))
+        self.auto_save_interval_seconds = self._safe_int(payload.get("auto_save_interval_seconds", 30), 30, 5, 3600)
 
     def _save_ui_settings(self) -> None:
         self.ui_settings.update(
@@ -536,12 +600,16 @@ class NovelQtMainWindow(QMainWindow):
                 "theme_preset": self.theme_preset,
                 "custom_theme_colors": dict(self.custom_theme_colors),
                 "background_image": self.background_image,
+                "background_video": self.background_video,
                 "background_filter": self.background_filter,
                 "background_filter_strength": int(self.background_filter_strength),
                 "ai_colors": normalize_ai_color_config(self.ai_colors),
                 "library_collapsed": bool(self.library_collapsed),
                 "library_width": int(self.library_width),
                 "qt_drawer_width": int(self.qt_drawer_width),
+                "correction_ai_enabled": bool(self.correction_ai_enabled),
+                "auto_save_enabled": bool(self.auto_save_enabled),
+                "auto_save_interval_seconds": int(self.auto_save_interval_seconds),
             }
         )
         try:
@@ -740,19 +808,52 @@ class NovelQtMainWindow(QMainWindow):
         self.resize(1540, 940)
         self.setMinimumSize(1024, 720)
 
-        root = QWidget()
+        self.central_shell = QWidget()
+        self.central_shell.setObjectName("CentralShell")
+        shell_layout = QGridLayout(self.central_shell)
+        shell_layout.setContentsMargins(0, 0, 0, 0)
+        shell_layout.setSpacing(0)
+
+        self.background_video_label = QLabel(self.central_shell)
+        self.background_video_label.setScaledContents(True)
+        self.background_video_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.background_video_label.hide()
+        self.background_video_scene = QGraphicsScene(self.central_shell)
+        self.background_video_item = QGraphicsVideoItem()
+        self.background_video_item.setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatioByExpanding)
+        self.background_video_scene.addItem(self.background_video_item)
+        self.background_video_view = QGraphicsView(self.background_video_scene, self.central_shell)
+        self.background_video_view.setFrameShape(QFrame.Shape.NoFrame)
+        self.background_video_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.background_video_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.background_video_view.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.background_video_view.setStyleSheet("background: transparent; border: none;")
+        self.background_video_view.hide()
+        self.background_movie: QMovie | None = None
+        self.background_media_player: QMediaPlayer | None = None
+
+        root = QWidget(self.central_shell)
         root.setObjectName("AppRoot")
         root.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.root_widget = root
         root_layout = QVBoxLayout(root)
         root_layout.setContentsMargins(16, 14, 16, 12)
         root_layout.setSpacing(10)
-        self.setCentralWidget(root)
+
+        shell_layout.addWidget(self.background_video_view, 0, 0)
+        shell_layout.addWidget(self.background_video_label, 0, 0)
+        shell_layout.addWidget(root, 0, 0)
+        self.setCentralWidget(self.central_shell)
+        self.background_video_view.lower()
+        self.background_video_label.lower()
+        self.root_widget.raise_()
 
         self.header = QFrame()
         self.header.setObjectName("HeaderBar")
+        self.header.setMinimumHeight(58)
+        self.header.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         header_layout = QHBoxLayout(self.header)
-        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setContentsMargins(10, 5, 10, 5)
         header_layout.setSpacing(12)
         title_box = QVBoxLayout()
         self.title_label = QLabel("小说写作台")
@@ -760,19 +861,38 @@ class NovelQtMainWindow(QMainWindow):
         self.title_label.setVisible(False)
         title_box.addWidget(self.title_label)
         header_layout.addLayout(title_box, 0)
-        self.toolbar_box = QHBoxLayout()
+        self.toolbar_scroll = QScrollArea()
+        self.toolbar_scroll.setObjectName("ToolbarScroll")
+        self.toolbar_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.toolbar_scroll.setWidgetResizable(False)
+        self.toolbar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.toolbar_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.toolbar_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.toolbar_scroll.setFixedHeight(50)
+        self.toolbar_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        self.toolbar_scroll_content = QWidget()
+        self.toolbar_scroll_content.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.toolbar_box = QHBoxLayout(self.toolbar_scroll_content)
+        self.toolbar_box.setContentsMargins(0, 1, 0, 1)
         self.toolbar_box.setSpacing(8)
         self.toolbar_buttons: list[QPushButton] = []
-        header_layout.addLayout(self.toolbar_box)
+        self.toolbar_scroll.setWidget(self.toolbar_scroll_content)
+        header_layout.addWidget(self.toolbar_scroll)
         header_layout.addStretch(1)
         root_layout.addWidget(self.header)
         self._build_toolbar()
+        self._sync_toolbar_scroll_size()
+
+        body_wrapper = QWidget()
+        body_wrapper.setObjectName("BodyWrapper")
+        body_layout = QHBoxLayout(body_wrapper)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
 
         self.main_splitter = SoftSplitter(Qt.Orientation.Horizontal)
         self.main_splitter.setObjectName("MainSplitter")
         self.main_splitter.setChildrenCollapsible(False)
         self.main_splitter.setHandleWidth(10)
-        root_layout.addWidget(self.main_splitter, 1)
 
         self.library_panel = self._build_library_panel()
         self.workspace_panel = self._build_workspace_panel()
@@ -783,20 +903,52 @@ class NovelQtMainWindow(QMainWindow):
         self.main_splitter.setSizes([96 if self.library_collapsed else self.library_width, 1100])
         self.main_splitter.splitterMoved.connect(self._on_splitter_moved)
 
+        body_layout.addWidget(self.main_splitter, 1)
+
+        self.drawer = QFrame()
+        self.drawer.setObjectName("SideDrawer")
+        self.drawer.setFixedWidth(0)
+        self.drawer.setVisible(False)
+        drawer_layout = QVBoxLayout(self.drawer)
+        drawer_layout.setContentsMargins(0, 0, 0, 0)
+        drawer_layout.setSpacing(0)
+        drawer_layout.addWidget(self._build_drawer_title_bar())
+        self.drawer_tabs = self._build_drawer_tabs()
+        self.drawer_tabs.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        drawer_layout.addWidget(self.drawer_tabs, 1)
+
+        body_layout.addWidget(self.drawer, 0)
+
+        root_layout.addWidget(body_wrapper, 1)
+
         self.status_bar_frame = QFrame()
         self.status_bar_frame.setObjectName("StatusBar")
+        self.status_bar_frame.setMinimumHeight(34)
+        self.status_bar_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         status_layout = QHBoxLayout(self.status_bar_frame)
-        status_layout.setContentsMargins(0, 0, 0, 0)
+        status_layout.setContentsMargins(10, 5, 10, 5)
+        status_layout.setSpacing(10)
         self.status_label = QLabel("")
         self.status_label.setObjectName("StatusText")
+        self.status_label.setMinimumWidth(0)
+        self.status_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         self.save_label = QLabel("已保存")
-        self.save_label.setObjectName("StatusText")
+        self.save_label.setObjectName("StatusMetric")
+        self.save_label.setMinimumWidth(66)
         self.selection_label = QLabel("选中 0 字")
-        self.selection_label.setObjectName("StatusText")
+        self.selection_label.setObjectName("StatusMetric")
+        self.selection_label.setMinimumWidth(88)
         self.ai_ratio_label = QLabel("AI标记 0%")
-        self.ai_ratio_label.setObjectName("StatusText")
+        self.ai_ratio_label.setObjectName("StatusMetric")
+        self.ai_ratio_label.setMinimumWidth(94)
         self.word_label = QLabel("字数 0")
-        self.word_label.setObjectName("StatusText")
+        self.word_label.setObjectName("StatusMetric")
+        self.word_label.setMinimumWidth(78)
+        for metric_label in (self.save_label, self.selection_label, self.ai_ratio_label, self.word_label):
+            metric_label.setMinimumHeight(24)
+            metric_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            metric_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         status_layout.addWidget(self.status_label, 1)
         status_layout.addWidget(self.save_label)
         status_layout.addWidget(self.selection_label)
@@ -804,63 +956,106 @@ class NovelQtMainWindow(QMainWindow):
         status_layout.addWidget(self.word_label)
         root_layout.addWidget(self.status_bar_frame)
 
-        self.drawer = QDockWidget("详情抽屉", self)
-        self.drawer.setObjectName("SideDrawer")
-        self.drawer.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.drawer.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
-        self.drawer.setFeatures(
-            QDockWidget.DockWidgetFeature.DockWidgetClosable
-            | QDockWidget.DockWidgetFeature.DockWidgetMovable
-        )
-        self.drawer.setTitleBarWidget(self._build_drawer_title_bar())
-        self.drawer_tabs = self._build_drawer_tabs()
-        self.drawer_tabs.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.drawer.setWidget(self.drawer_tabs)
-        self.drawer.setMinimumWidth(320)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.drawer)
-        self.drawer.hide()
-        self.drawer.visibilityChanged.connect(self._on_drawer_visibility_changed)
         self._apply_responsive_chrome()
 
     def _build_toolbar(self) -> None:
-        groups = {
-            "编辑": [
-                ("保存", self._save_current),
-                ("历史", self._open_history_dialog),
-                ("导入到当前", self._import_for_current_context),
-                ("智能导入", self._smart_import),
-                ("导出当前 TXT", lambda: self._export_current("txt")),
-                ("导出当前 Markdown", lambda: self._export_current("md")),
-                ("导出当前 DOCX", lambda: self._export_current("docx")),
-            ],
-            "AI": [
-                ("AI 对话", self._open_ai_chat),
-                ("长篇生成", self._start_multi_agent_generation),
-                ("润色", lambda: self._start_generation("polish")),
-                ("同步大纲", self._refresh_summary),
-                ("检测AI概率", self._detect_current_chapter_ai_probability),
-                ("分析全书", self._analyze_book_full),
-                ("清除本章AI标记", self._clear_current_ai_spans),
-            ],
-            "视图": [
-                ("折叠导航", self._toggle_library_collapsed),
-                ("详情抽屉", lambda: self._open_drawer("details")),
-                ("人物星图", lambda: self._open_drawer("star")),
-                ("生成记录", lambda: self._open_drawer("review")),
-                ("任务抽屉", lambda: self._open_drawer("tasks")),
-                ("专注写作", self._toggle_focus_mode),
-            ],
-        }
-        for group_name, actions in groups.items():
-            button = QPushButton(f"{group_name} ▾")
-            menu = QMenu(self)
-            for label, callback in actions:
-                action = QAction(label, self)
-                action.triggered.connect(callback)
-                menu.addAction(action)
-            button.setMenu(menu)
-            self.toolbar_box.addWidget(button)
-            self.toolbar_buttons.append(button)
+        edit_menu = QMenu(self)
+        for label, callback in [
+            ("历史", self._open_history_dialog),
+            ("导入到当前", self._import_for_current_context),
+            ("智能导入", self._smart_import),
+        ]:
+            action = QAction(label, self)
+            action.triggered.connect(callback)
+            edit_menu.addAction(action)
+        edit_menu.addSeparator()
+        export_sub = edit_menu.addMenu("导出")
+        for label, callback in [
+            ("导出 TXT", lambda: self._export_current("txt")),
+            ("导出 Markdown", lambda: self._export_current("md")),
+            ("导出 DOCX", lambda: self._export_current("docx")),
+        ]:
+            action = QAction(label, self)
+            action.triggered.connect(callback)
+            export_sub.addAction(action)
+        edit_button = QPushButton("编辑 ▾")
+        edit_button.setMenu(edit_menu)
+        self.toolbar_box.addWidget(edit_button)
+        self.toolbar_buttons.append(edit_button)
+
+        ai_menu = QMenu(self)
+        ai_menu.addAction(QAction("AI 设置", self, triggered=self._open_ai_settings))
+        ai_menu.addSeparator()
+        for label, callback in [
+            ("AI 对话", self._open_ai_chat),
+            ("长篇生成", self._start_multi_agent_generation),
+            ("润色", lambda: self._start_generation("polish")),
+            ("同步大纲", self._refresh_summary),
+            ("检测AI概率", self._detect_current_chapter_ai_probability),
+            ("分析全书", self._analyze_book_full),
+            ("清除本章AI标记", self._clear_current_ai_spans),
+        ]:
+            action = QAction(label, self)
+            action.triggered.connect(callback)
+            ai_menu.addAction(action)
+        ai_button = QPushButton("AI ▾")
+        ai_button.setMenu(ai_menu)
+        self.toolbar_box.addWidget(ai_button)
+        self.toolbar_buttons.append(ai_button)
+
+        view_menu = QMenu(self)
+        view_menu.addAction(QAction("视图配置", self, triggered=self._open_view_settings))
+        view_menu.addSeparator()
+        for label, callback in [
+            ("折叠导航", self._toggle_library_collapsed),
+            ("详情抽屉", lambda: self._open_drawer("details")),
+            ("人物星图", lambda: self._open_drawer("star")),
+            ("生成记录", lambda: self._open_drawer("review")),
+            ("任务抽屉", lambda: self._open_drawer("tasks")),
+            ("专注写作", self._toggle_focus_mode),
+        ]:
+            action = QAction(label, self)
+            action.triggered.connect(callback)
+            view_menu.addAction(action)
+        view_button = QPushButton("视图 ▾")
+        view_button.setMenu(view_menu)
+        self.toolbar_box.addWidget(view_button)
+        self.toolbar_buttons.append(view_button)
+
+        settings_menu = QMenu(self)
+        self.correction_ai_action = QAction("纠错启用 AI 检测", self)
+        self.correction_ai_action.setCheckable(True)
+        self.correction_ai_action.setChecked(self.correction_ai_enabled)
+        self.correction_ai_action.triggered.connect(self._toggle_correction_ai_detection)
+        self.auto_save_action = QAction("启用定时保存", self)
+        self.auto_save_action.setCheckable(True)
+        self.auto_save_action.setChecked(self.auto_save_enabled)
+        self.auto_save_action.triggered.connect(self._toggle_auto_save)
+        self.auto_save_interval_action = QAction(self._auto_save_interval_action_text(), self)
+        self.auto_save_interval_action.triggered.connect(self._configure_auto_save_interval)
+        settings_menu.addAction(self.correction_ai_action)
+        settings_menu.addSeparator()
+        settings_menu.addAction(self.auto_save_action)
+        settings_menu.addAction(self.auto_save_interval_action)
+        settings_button = QPushButton("设定 ▾")
+        settings_button.setMenu(settings_menu)
+        self.toolbar_box.addWidget(settings_button)
+        self.toolbar_buttons.append(settings_button)
+        for button in self.toolbar_buttons:
+            self._prepare_toolbar_button(button)
+
+    def _prepare_toolbar_button(self, button: QPushButton) -> None:
+        button.setObjectName("ToolbarButton")
+        button.setMinimumHeight(34)
+        button.setMinimumWidth(max(86, button.sizeHint().width()))
+        button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+    def _sync_toolbar_scroll_size(self) -> None:
+        if not hasattr(self, "toolbar_scroll_content"):
+            return
+        self.toolbar_scroll_content.adjustSize()
+        hint = self.toolbar_scroll_content.sizeHint()
+        self.toolbar_scroll_content.setMinimumSize(hint.width(), max(44, hint.height()))
 
     def _build_library_panel(self) -> QFrame:
         panel = QFrame()
@@ -890,21 +1085,11 @@ class NovelQtMainWindow(QMainWindow):
         self.library_generate_button = QPushButton("长篇生成")
         self.library_generate_button.setObjectName("TinyButton")
         self.library_generate_button.clicked.connect(self._start_multi_agent_generation)
-        self.library_settings_button = QPushButton("设置")
-        self.library_settings_button.setObjectName("TinyButton")
-        settings_menu = QMenu(self)
-        for label, callback in [
-            ("视图配置", self._open_view_settings),
-            ("AI 设置", self._open_ai_settings),
-            ("Skills 分层管理", self._open_book_settings),
-            ("项目学习", self._open_project_learning_dialog),
-        ]:
-            action = QAction(label, self)
-            action.triggered.connect(callback)
-            settings_menu.addAction(action)
-        self.library_settings_button.setMenu(settings_menu)
+        self.library_skills_button = QPushButton("Skills 分层管理")
+        self.library_skills_button.setObjectName("TinyButton")
+        self.library_skills_button.clicked.connect(self._open_book_settings)
         action_row.addWidget(self.library_generate_button, 1)
-        action_row.addWidget(self.library_settings_button)
+        action_row.addWidget(self.library_skills_button)
         layout.addLayout(action_row)
 
         self.tree_model = QStandardItemModel(self)
@@ -915,6 +1100,13 @@ class NovelQtMainWindow(QMainWindow):
         self.library_tree.setEditTriggers(QTreeView.EditTrigger.NoEditTriggers)
         self.library_tree.setIndentation(14)
         self.library_tree.setUniformRowHeights(True)
+        self.library_tree.setDragDropMode(QTreeView.DragDropMode.InternalMove)
+        self.library_tree.setDragEnabled(True)
+        self.library_tree.setAcceptDrops(True)
+        self.library_tree.setDropIndicatorShown(True)
+        self.library_tree.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.tree_model.supportedDropActions = lambda: Qt.DropAction.MoveAction
+        self._patch_tree_model_drop()
         self.library_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.library_tree.customContextMenuRequested.connect(self._show_library_context_menu)
         self.library_tree.selectionModel().currentChanged.connect(self._on_tree_current_changed)
@@ -930,16 +1122,6 @@ class NovelQtMainWindow(QMainWindow):
         self.library_compact_list.setUniformItemSizes(True)
         self.library_compact_list.currentItemChanged.connect(self._on_compact_book_selected)
         layout.addWidget(self.library_compact_list, 1)
-        self.library_history_label = QLabel("最近打开")
-        self.library_history_label.setObjectName("MetaLabel")
-        layout.addWidget(self.library_history_label)
-        self.library_history_list = QListWidget()
-        self.library_history_list.setObjectName("LibraryHistoryList")
-        self.library_history_list.setMaximumHeight(126)
-        self.library_history_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.library_history_list.setTextElideMode(Qt.TextElideMode.ElideRight)
-        self.library_history_list.itemClicked.connect(self._on_history_item_clicked)
-        layout.addWidget(self.library_history_list)
         self._apply_library_collapsed_state()
         return panel
 
@@ -1012,22 +1194,52 @@ class NovelQtMainWindow(QMainWindow):
 
         self.ai_quick_bar = QFrame()
         self.ai_quick_bar.setObjectName("Card")
+        self.ai_quick_bar.setMinimumHeight(68)
+        self.ai_quick_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         quick_layout = QHBoxLayout(self.ai_quick_bar)
-        quick_layout.setContentsMargins(8, 4, 8, 4)
-        quick_layout.setSpacing(6)
+        quick_layout.setContentsMargins(10, 7, 10, 7)
+        quick_layout.setSpacing(0)
+        self.ai_quick_scroll = QScrollArea()
+        self.ai_quick_scroll.setObjectName("QuickActionScroll")
+        self.ai_quick_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.ai_quick_scroll.setWidgetResizable(False)
+        self.ai_quick_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.ai_quick_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.ai_quick_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.ai_quick_scroll.setFixedHeight(54)
+        self.ai_quick_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        quick_content = QWidget()
+        self.ai_quick_content = quick_content
+        quick_content.setObjectName("QuickActionContent")
+        quick_content.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        quick_buttons_layout = QHBoxLayout(quick_content)
+        quick_buttons_layout.setContentsMargins(0, 2, 0, 2)
+        quick_buttons_layout.setSpacing(6)
         self.ai_quick_buttons: list[QPushButton] = []
         for label, callback in [
             ("✨ 润色", lambda: self._start_generation("polish")),
             ("🔍 AI检测", self._detect_current_chapter_ai_probability),
             ("长篇生成", self._start_multi_agent_generation),
+            ("💾 保存", self._save_current),
+            ("📋 全章复制", self._copy_full_chapter),
+            ("📐 一键排版", self._auto_format_content),
+            ("🔎 搜索", self._show_search_bar),
+            ("🔍 纠错", self._auto_correct_chapter),
+            ("👁 隐藏正文", self._toggle_content_visibility),
         ]:
             btn = QPushButton(label)
             btn.setObjectName("TinyButton")
-            btn.setMinimumWidth(0)
+            btn.setMinimumHeight(32)
+            btn.setMinimumWidth(max(72, btn.sizeHint().width()))
+            btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             btn.clicked.connect(callback)
-            quick_layout.addWidget(btn)
+            quick_buttons_layout.addWidget(btn)
             self.ai_quick_buttons.append(btn)
-        quick_layout.addStretch(1)
+        quick_buttons_layout.addStretch(1)
+        quick_content.adjustSize()
+        quick_content.setMinimumSize(quick_content.sizeHint().width(), 44)
+        self.ai_quick_scroll.setWidget(quick_content)
+        quick_layout.addWidget(self.ai_quick_scroll, 1)
         layout.addWidget(self.ai_quick_bar)
 
         self.stack = QStackedWidget()
@@ -1102,6 +1314,7 @@ class NovelQtMainWindow(QMainWindow):
         editor_layout.setContentsMargins(12, 10, 12, 12)
         editor_label = QLabel("正文")
         editor_label.setObjectName("SectionTitle")
+        self.content_label = editor_label
         self.content_editor = QPlainTextEdit()
         self.content_editor.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.content_editor.textChanged.connect(self._on_editor_changed)
@@ -1123,6 +1336,7 @@ class NovelQtMainWindow(QMainWindow):
             self.drawer_tab_indexes[key] = tabs.addTab(widget, label)
 
         add_tab("overview", self._build_overview_tab(), "概览")
+        add_tab("shortcuts", self._build_shortcuts_tab(), "快键")
         add_tab("outline", self._build_outline_tab(), "生成")
         add_tab("characters", self._build_characters_tab(), "人物")
         add_tab("star", self._build_star_graph_tab(), "星图")
@@ -1145,7 +1359,7 @@ class NovelQtMainWindow(QMainWindow):
         close_button = QPushButton("×")
         close_button.setObjectName("TinyButton")
         close_button.setFixedWidth(32)
-        close_button.clicked.connect(self.drawer.hide)
+        close_button.clicked.connect(self._hide_drawer)
         layout.addWidget(self.drawer_title_label, 1)
         layout.addWidget(close_button)
         return bar
@@ -1208,6 +1422,53 @@ class NovelQtMainWindow(QMainWindow):
         self.sourcebook_preview.setReadOnly(True)
         layout.addWidget(self.overview_meta)
         layout.addWidget(self.sourcebook_preview, 1)
+        return page
+
+    def _build_shortcuts_tab(self) -> QWidget:
+        page = self._make_drawer_page()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        title = QLabel("人名快键")
+        title.setObjectName("SectionTitle")
+        header.addWidget(title, 1)
+        layout.addLayout(header)
+
+        hint = QLabel("格式：Ctrl+D = '张三'   按压快捷键时在正文光标处插入对应人名。")
+        hint.setObjectName("MetaLabel")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.shortcuts_list = QListWidget()
+        self.shortcuts_list.setObjectName("DrawerList")
+        layout.addWidget(self.shortcuts_list, 1)
+
+        add_row = QHBoxLayout()
+        add_row.setSpacing(6)
+        self.shortcut_key_input = QLineEdit()
+        self.shortcut_key_input.setPlaceholderText("快捷键（如 Ctrl+D）")
+        self.shortcut_key_input.setMaximumWidth(150)
+        self.shortcut_name_input = QLineEdit()
+        self.shortcut_name_input.setPlaceholderText("人名（如 张三）")
+        add_row.addWidget(self.shortcut_key_input)
+        add_row.addWidget(self.shortcut_name_input, 1)
+        layout.addLayout(add_row)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        add_btn = QPushButton("➕ 新增")
+        add_btn.clicked.connect(self._add_name_shortcut)
+        del_btn = QPushButton("🗑 删除")
+        del_btn.clicked.connect(self._delete_name_shortcut)
+        pick_btn = QPushButton("从人物列表选取")
+        pick_btn.clicked.connect(self._pick_characters_for_shortcuts)
+        btn_row.addWidget(add_btn)
+        btn_row.addWidget(del_btn)
+        btn_row.addWidget(pick_btn)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
         return page
 
     def _build_characters_tab(self) -> QWidget:
@@ -1293,6 +1554,11 @@ class NovelQtMainWindow(QMainWindow):
         page = self._make_drawer_page()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(14, 14, 14, 14)
+        self.world_search = QLineEdit()
+        self.world_search.setPlaceholderText("搜索世界观…")
+        self.world_search.setClearButtonEnabled(True)
+        self.world_search.textChanged.connect(self._filter_world_list)
+        layout.addWidget(self.world_search)
         self.world_list = QListWidget()
         self.world_list.setObjectName("DrawerList")
         self.world_list.currentItemChanged.connect(self._on_world_selected)
@@ -1434,7 +1700,11 @@ class NovelQtMainWindow(QMainWindow):
         self.tokens = self._build_theme_tokens()
         self.theme_mode = self.tokens.mode
         self.state.theme_mode = self.theme_mode
-        self.background_processed_image = self._prepare_background_image()
+        video_active = bool(self.background_video and Path(self.background_video).exists())
+        if video_active:
+            self.background_processed_image = self._prepare_transparent_placeholder()
+        else:
+            self.background_processed_image = self._prepare_background_image()
         self._tree_icon_cache.clear()
         self.setStyleSheet(build_stylesheet(self.tokens, self.background_processed_image))
         if hasattr(self, "star_graph"):
@@ -1453,6 +1723,16 @@ class NovelQtMainWindow(QMainWindow):
     def _normalize_hex_color(self, value: str) -> str:
         color = QColor(value.strip())
         return color.name().upper() if color.isValid() else ""
+
+    def _prepare_transparent_placeholder(self) -> str:
+        output_dir = self.database.data_dir / "ui"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output = output_dir / "video_bg_placeholder.png"
+        if not output.exists():
+            pixmap = QPixmap(16, 16)
+            pixmap.fill(Qt.GlobalColor.transparent)
+            pixmap.save(str(output), "PNG")
+        return str(output)
 
     def _prepare_background_image(self) -> str:
         if not self.background_image:
@@ -1504,6 +1784,112 @@ class NovelQtMainWindow(QMainWindow):
             shutil.copy2(source, target)
         return str(target)
 
+    def _store_background_video_source(self, source_value: str) -> str:
+        if not source_value:
+            return ""
+        source = Path(source_value)
+        if not source.exists():
+            return ""
+        target_dir = self.database.data_dir / "ui"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        suffix = source.suffix.lower() or ".mp4"
+        target = target_dir / f"background_video{suffix}"
+        if source.resolve() != target.resolve():
+            shutil.copy2(source, target)
+        return str(target)
+
+    def _apply_background_video(self) -> None:
+        if not hasattr(self, "background_video_label"):
+            return
+        self._stop_background_video()
+        if not self.background_video:
+            self.background_video_label.hide()
+            if hasattr(self, "background_video_view"):
+                self.background_video_view.hide()
+            return
+        source = Path(self.background_video)
+        if not source.exists():
+            self.background_video_label.hide()
+            if hasattr(self, "background_video_view"):
+                self.background_video_view.hide()
+            return
+        suffix = source.suffix.lower()
+        if suffix in {".gif", ".webp", ".apng"}:
+            if hasattr(self, "background_video_view"):
+                self.background_video_view.hide()
+            self.background_movie = QMovie(str(source))
+            self.background_movie.setCacheMode(QMovie.CacheMode.CacheAll)
+            self.background_video_label.setScaledContents(True)
+            self.background_video_label.setMovie(self.background_movie)
+            self.background_movie.start()
+            self.background_video_label.show()
+            self.background_video_label.lower()
+            self.root_widget.raise_()
+        elif suffix in {".mp4", ".avi", ".mkv", ".webm", ".mov", ".wmv", ".flv"}:
+            self.background_video_label.hide()
+            if self.background_movie is not None:
+                self.background_movie.stop()
+                self.background_movie = None
+            self.background_media_player = QMediaPlayer()
+            self.background_media_player.setVideoOutput(self.background_video_item)
+            self.background_media_player.setSource(QUrl.fromLocalFile(str(source)))
+            self.background_media_player.mediaStatusChanged.connect(self._on_video_media_status)
+            self._resize_background_video_item()
+            self.background_video_view.show()
+            self.background_video_view.lower()
+            self.root_widget.raise_()
+            self.background_media_player.play()
+        else:
+            self.background_video_label.hide()
+            if hasattr(self, "background_video_view"):
+                self.background_video_view.hide()
+            self.background_movie = None
+            return
+
+    def _on_video_media_status(self, status: QMediaPlayer.MediaStatus) -> None:
+        if status == QMediaPlayer.MediaStatus.EndOfMedia and self.background_media_player:
+            self.background_media_player.setPosition(0)
+            self.background_media_player.play()
+        elif status == QMediaPlayer.MediaStatus.InvalidMedia:
+            self._disable_background_video("视频文件无效或解码失败，已自动清除视频背景。")
+
+    def _disable_background_video(self, message: str) -> None:
+        self._stop_background_video()
+        self.background_video = ""
+        self.background_processed_image = ""
+        self._apply_theme()
+        self._save_ui_settings()
+        self._set_status(message)
+
+    def _stop_background_video(self) -> None:
+        if self.background_movie is not None:
+            self.background_movie.stop()
+            self.background_movie = None
+        if self.background_media_player is not None:
+            self.background_media_player.stop()
+            try:
+                self.background_media_player.setVideoOutput(None)
+                self.background_media_player.setSource(QUrl())
+            except TypeError:
+                pass
+            self.background_media_player = None
+        if hasattr(self, "background_video_label") and self.background_video_label:
+            self.background_video_label.clear()
+            self.background_video_label.hide()
+        if hasattr(self, "background_video_view") and self.background_video_view:
+            self.background_video_view.hide()
+
+    def _resize_background_video_item(self) -> None:
+        if not hasattr(self, "background_video_item"):
+            return
+        size = self.central_shell.size() if hasattr(self, "central_shell") else self.size()
+        width = max(1, size.width())
+        height = max(1, size.height())
+        rect = QRectF(0, 0, width, height)
+        self.background_video_scene.setSceneRect(rect)
+        self.background_video_item.setPos(0, 0)
+        self.background_video_item.setSize(QSizeF(width, height))
+
     def _open_view_settings(self) -> None:
         dialog = ViewSettingsDialog(
             self,
@@ -1512,6 +1898,7 @@ class NovelQtMainWindow(QMainWindow):
                 "custom_theme_colors": self.custom_theme_colors,
                 "ai_colors": self.ai_colors,
                 "background_image": self.background_image,
+                "background_video": self.background_video,
                 "background_filter": self.background_filter,
                 "background_filter_strength": self.background_filter_strength,
             },
@@ -1542,14 +1929,28 @@ class NovelQtMainWindow(QMainWindow):
         self.ai_colors = normalize_ai_color_config(values.get("ai_colors", {}))
         set_ai_probability_meta(self.ai_colors)
         self.background_image = self._store_background_source(str(values.get("background_image", "")))
+        self.background_video = self._store_background_video_source(str(values.get("background_video", "")))
         self.background_filter = str(values.get("background_filter", "soft_dark"))
         if self.background_filter not in {code for code, _label in BACKGROUND_FILTERS}:
             self.background_filter = "soft_dark"
         self.background_filter_strength = self._safe_int(values.get("background_filter_strength", 35), 35, 0, 100)
         self._apply_theme()
+        self._apply_background_video()
+        self._apply_editor_font_settings(values)
         self._refresh_ai_color_dependents()
         self._save_ui_settings()
         self._set_status("视图配置已更新")
+
+    def _apply_editor_font_settings(self, values: dict[str, Any]) -> None:
+        font_size = self._safe_int(values.get("editor_font_size", 14), 14, 10, 24)
+        line_height = self._safe_int(values.get("editor_line_height", 145), 145, 100, 300) / 100.0
+        new_qss = f"font-size: {font_size}pt; line-height: {line_height:.2f};"
+        for attr in ("content_editor", "outline_editor", "chapter_outline_editor"):
+            if hasattr(self, attr):
+                widget = getattr(self, attr)
+                existing = widget.styleSheet() or ""
+                cleaned = re.sub(r"font-size:\s*[\d.]+pt\s*;\s*line-height:\s*[\d.]+\s*;", "", existing)
+                widget.setStyleSheet(f"QPlainTextEdit, QTextEdit {{ {new_qss} }}\n{cleaned}".strip())
 
     def _refresh_ai_color_dependents(self) -> None:
         if hasattr(self, "library_tree"):
@@ -1584,6 +1985,36 @@ class NovelQtMainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+E"), self, activated=lambda: self._export_current("txt"))
         QShortcut(QKeySequence("Ctrl+Shift+E"), self, activated=lambda: self._export_current("docx"))
         QShortcut(QKeySequence("Ctrl+L"), self, activated=self._toggle_library_collapsed)
+        QShortcut(QKeySequence("Ctrl+0"), self, activated=self._reset_all_settings)
+
+    def _reset_all_settings(self) -> None:
+        if not confirm(self, "重置全部配置", "此操作将清空所有设置（视图、AI、主题、背景图片/视频等），恢复为默认状态。\n\n确定要继续吗？", danger=True):
+            return
+        self._stop_background_video()
+        self.background_image = ""
+        self.background_video = ""
+        self.background_processed_image = ""
+        self.background_filter = "soft_dark"
+        self.background_filter_strength = 35
+        self.theme_preset = "light_blue"
+        self.custom_theme_colors = {}
+        self.ai_colors = normalize_ai_color_config({})
+        set_ai_probability_meta(self.ai_colors)
+        self.library_collapsed = False
+        self.library_width = 260
+        self.qt_drawer_width = 420
+        for path in (self.ui_config_path, self.ai_config_path):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        self.ui_settings = {}
+        self._apply_theme()
+        self._apply_background_video()
+        self._apply_editor_font_settings({"editor_font_size": 14, "editor_line_height": 145})
+        self._refresh_ai_color_dependents()
+        self._save_ui_settings()
+        self._set_status("全部配置已重置为默认值。")
 
     def _load_library_tree(self, preferred_key: tuple[str, int | None, int | None] | None = None) -> None:
         self.tree_model.removeRows(0, self.tree_model.rowCount())
@@ -1592,8 +2023,10 @@ class NovelQtMainWindow(QMainWindow):
         for book in self.database.list_books():
             book_id = int(book["id"])
             book_title = str(book["title"])
-            compact_rows.append((book_id, book_title))
-            book_item = self._make_book_tree_item(book_title, book_id)
+            book_words = self.database.count_book_words(book_id)
+            tree_book_title = f"{book_title}  ({book_words}字)" if book_words else book_title
+            compact_rows.append((book_id, tree_book_title))
+            book_item = self._make_book_tree_item(tree_book_title, book_id)
             root.appendRow(book_item)
             chapters_all = self.database.list_chapters(book_id, ALL_VOLUMES)
             chapters_by_volume: dict[int | None, list[Any]] = {}
@@ -1601,7 +2034,12 @@ class NovelQtMainWindow(QMainWindow):
                 chapters_by_volume.setdefault(chapter["volume_id"], []).append(chapter)
             for volume in self.database.list_volumes(book_id):
                 volume_id = int(volume["id"])
-                volume_item = self._make_volume_tree_item(str(volume["title"]), volume_id)
+                volume_index = int(volume["sort_order"])
+                vol_words = self.database.count_volume_words(volume_id)
+                vol_title = f"第{volume_index}卷 · {volume['title']}"
+                if vol_words:
+                    vol_title += f"  ({vol_words}字)"
+                volume_item = self._make_volume_tree_item(vol_title, volume_id)
                 book_item.appendRow(volume_item)
                 for chapter in chapters_by_volume.get(volume_id, []):
                     volume_item.appendRow(self._make_chapter_tree_item(chapter))
@@ -1618,6 +2056,71 @@ class NovelQtMainWindow(QMainWindow):
             self._select_tree_key(target)
         else:
             self._update_library_create_button()
+
+    def _patch_tree_model_drop(self) -> None:
+        self._drop_pending = False
+        self._drop_applying = False
+        def on_rows_removed(parent, first, last):
+            if self._drop_applying:
+                return
+            self._drop_pending = True
+        def on_rows_inserted(parent, first, last):
+            if self._drop_applying:
+                return
+            if not self._drop_pending:
+                return
+            self._drop_pending = False
+            QTimer.singleShot(0, self._apply_drop_changes)
+
+        self.tree_model.rowsAboutToBeRemoved.connect(on_rows_removed)
+        self.tree_model.rowsInserted.connect(on_rows_inserted)
+
+    def _apply_drop_changes(self) -> None:
+        if self._drop_applying:
+            return
+        self._drop_applying = True
+        try:
+            self._apply_drop_changes_impl()
+        finally:
+            self._drop_applying = False
+
+    def _apply_drop_changes_impl(self) -> None:
+        updates: list[tuple[int, int | None, int]] = []
+        root = self.tree_model.invisibleRootItem()
+        for book_row in range(root.rowCount()):
+            book_item = root.child(book_row)
+            book_id = book_item.data(ID_ROLE)
+            vol_order = 0
+            for row in range(book_item.rowCount()):
+                child = book_item.child(row)
+                kind = child.data(KIND_ROLE)
+                child_id = child.data(ID_ROLE)
+                if kind == "volume" and child_id is not None:
+                    vol_order += 1
+                    vol_id = int(child_id)
+                    chap_order = 0
+                    for c_row in range(child.rowCount()):
+                        chapter = child.child(c_row)
+                        if chapter.data(KIND_ROLE) == "chapter" and chapter.data(ID_ROLE) is not None:
+                            chap_order += 1
+                            updates.append((int(chapter.data(ID_ROLE)), vol_id, chap_order))
+                    self.database.connection.execute(
+                        "UPDATE volumes SET sort_order = ? WHERE id = ?", (vol_order, vol_id))
+                elif kind == "group":
+                    chap_order = 0
+                    for c_row in range(child.rowCount()):
+                        chapter = child.child(c_row)
+                        if chapter.data(KIND_ROLE) == "chapter" and chapter.data(ID_ROLE) is not None:
+                            chap_order += 1
+                            updates.append((int(chapter.data(ID_ROLE)), None, chap_order))
+        self.database.connection.executemany(
+            "UPDATE chapters SET volume_id = ?, sort_order = ? WHERE id = ?",
+            [(vol_id, order, cid) for cid, vol_id, order in updates],
+        )
+        self.database.connection.commit()
+        self._load_library_tree(self.current_tree_key)
+        if self.state.selected_chapter_id:
+            self._activate_tree_key(("chapter", self.state.selected_chapter_id, None))
 
     def _make_tree_item(self, text: str, kind: str, node_id: int | None, group_book_id: int | None = None) -> QStandardItem:
         item = QStandardItem(text)
@@ -1825,38 +2328,8 @@ class NovelQtMainWindow(QMainWindow):
             self._load_group(group_book_id)
         elif kind == "chapter" and node_id is not None:
             self._load_chapter(node_id)
-        self._record_navigation_history(key)
         self._refresh_drawer()
         self._update_library_create_button()
-
-    def _record_navigation_history(self, key: tuple[str, int | None, int | None]) -> None:
-        label = self.editor_path.text().strip() if hasattr(self, "editor_path") else ""
-        if not label:
-            label = self.editor_title.text().strip() if hasattr(self, "editor_title") else str(key)
-        self.navigation_history = [(item_key, item_label) for item_key, item_label in self.navigation_history if item_key != key]
-        self.navigation_history.insert(0, (key, label))
-        self.navigation_history = self.navigation_history[:8]
-        self._refresh_library_history_list()
-
-    def _refresh_library_history_list(self) -> None:
-        if not hasattr(self, "library_history_list"):
-            return
-        self.library_history_list.clear()
-        for key, label in self.navigation_history:
-            kind = key[0]
-            prefix = {"book": "书", "volume": "卷", "group": "组", "chapter": "章"}.get(kind, "项")
-            item = QListWidgetItem(f"{prefix} · {label}")
-            item.setData(Qt.ItemDataRole.UserRole, key)
-            self.library_history_list.addItem(item)
-
-    def _on_history_item_clicked(self, item: QListWidgetItem) -> None:
-        key = item.data(Qt.ItemDataRole.UserRole)
-        if not isinstance(key, tuple):
-            return
-        if not self._confirm_editor_navigation() or not self._confirm_side_form_navigation():
-            return
-        self._select_tree_key(key)
-        self._activate_tree_key(key)
 
     def _update_library_create_button(self) -> None:
         if not hasattr(self, "library_create_button"):
@@ -2075,6 +2548,7 @@ class NovelQtMainWindow(QMainWindow):
             if self.state.selected_chapter_id == int(result_chapter_id):
                 self._update_ai_probability_badge(level, probability)
             self._refresh_chapter_tree_item(int(result_chapter_id))
+            self._switch_drawer_tab("review")
 
         self._run_background_ai_job(label="AI 概率检测", callback=work, on_done=done)
 
@@ -2146,9 +2620,281 @@ class NovelQtMainWindow(QMainWindow):
         for key, value in cells.items():
             self.input_stat_value_labels[key].setText(value)
 
+    def _copy_full_chapter(self) -> None:
+        if self.state.editor_scope_kind != "chapter":
+            return
+        text = self.content_editor.toPlainText()
+        if not text.strip():
+            return
+        QApplication.clipboard().setText(text)
+        self._set_status("全章已复制到剪贴板")
+
+    def _toggle_content_visibility(self) -> None:
+        if self.state.editor_scope_kind != "chapter":
+            return
+        if not hasattr(self, "content_editor"):
+            return
+        if self.content_editor.isVisible():
+            self.content_editor.hide()
+            if hasattr(self, "content_label"):
+                self.content_label.hide()
+            self._set_status("正文已隐藏")
+        else:
+            self.content_editor.show()
+            if hasattr(self, "content_label"):
+                self.content_label.show()
+            self._set_status("正文已显示")
+
+    _search_matches: list = []
+
+    def _show_search_bar(self) -> None:
+        if not hasattr(self, "content_editor"):
+            return
+        search_text = ""
+        if hasattr(self, "_search_input"):
+            search_text = self._search_input.text()
+        text, ok = QInputDialog.getText(self, "查找", "输入查找内容：", text=search_text)
+        if not ok or not text.strip():
+            return
+        query = text.strip()
+        self._search_matches = []
+        content = self.content_editor.toPlainText()
+        idx = 0
+        while True:
+            idx = content.find(query, idx)
+            if idx == -1:
+                break
+            self._search_matches.append((idx, idx + len(query)))
+            idx += 1
+        if not self._search_matches:
+            info(self, "查找", f"未找到「{query}」。")
+            return
+        self._search_match_index = 0
+        self._search_query = query
+        self._highlight_search_match()
+
+    def _highlight_search_match(self) -> None:
+        if not self._search_matches:
+            return
+        idx = self._search_match_index % len(self._search_matches)
+        start, end = self._search_matches[idx]
+        cursor = self.content_editor.textCursor()
+        cursor.setPosition(start)
+        cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+        self.content_editor.setTextCursor(cursor)
+        self.content_editor.ensureCursorVisible()
+        self._set_status(f"匹配 {idx + 1}/{len(self._search_matches)}")
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_F3 and self._search_matches and hasattr(self, "_search_match_index"):
+            self._search_match_index += 1
+            self._highlight_search_match()
+            return
+        if event.key() == Qt.Key.Key_F and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self._show_search_bar()
+            return
+        super().keyPressEvent(event)
+
+    def _auto_correct_chapter(self) -> None:
+        if self.state.editor_scope_kind != "chapter" or not self.state.selected_chapter_id:
+            info(self, "纠错", "请先选择一个章节。")
+            return
+        content = self.content_editor.toPlainText()
+        if not content.strip():
+            info(self, "纠错", "当前章节正文为空。")
+            return
+        findings = detect_chinese_typos(content)
+        if self.correction_ai_enabled:
+            ai_service = self._ai_service_for_purpose("detector")
+            if ai_service is None:
+                self._show_correction_findings(content, findings, "AI 纠错检测未配置，已仅使用本地纠错。")
+                return
+            if self._find_active_background_job("AI 纠错"):
+                info(self, "任务运行中", "AI 纠错已经在运行。")
+                return
+
+            def work() -> list[dict[str, Any]]:
+                return ai_service.detect_chinese_typos(content, require_remote=True)
+
+            def done(payload: Any) -> None:
+                ai_findings = payload if isinstance(payload, list) else []
+                merged = self._merge_correction_findings(findings, ai_findings)
+                self._show_correction_findings(content, merged, f"AI 纠错完成：本地 {len(findings)} 处，AI {len(ai_findings)} 处。")
+
+            self._show_correction_findings(content, findings, f"本地纠错完成：{len(findings)} 处；AI 纠错检测中。")
+            self._run_background_ai_job(label="AI 纠错", callback=work, on_done=done)
+            return
+        self._show_correction_findings(content, findings)
+
+    def _show_correction_findings(self, content: str, findings: list[dict[str, Any]], status_message: str = "") -> None:
+        if not findings:
+            info(self, "纠错", "未发现错别字。")
+            self._clear_correction_highlights()
+            return
+        self._apply_correction_highlights(content, findings)
+        self._set_status(status_message or f"纠错完成：{len(findings)} 处疑似错别字已高亮")
+
+    def _merge_correction_findings(
+        self,
+        local_findings: list[dict[str, Any]],
+        ai_findings: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        occupied: list[tuple[int, int]] = []
+        for item in [*local_findings, *ai_findings]:
+            try:
+                start = int(item.get("start", 0))
+                end = int(item.get("end", start))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if end <= start:
+                continue
+            if any(start < old_end and end > old_start for old_start, old_end in occupied):
+                continue
+            normalized = dict(item)
+            normalized.setdefault("severity", "low")
+            normalized.setdefault("wrong", "")
+            normalized.setdefault("suggestion", "")
+            merged.append(normalized)
+            occupied.append((start, end))
+        merged.sort(key=lambda item: int(item.get("start", 0)))
+        return merged
+
+    def _apply_correction_highlights(self, content: str, findings: list[dict[str, Any]]) -> None:
+        if not hasattr(self, "content_editor"):
+            return
+        doc = self.content_editor.document()
+        selections: list[QTextEdit.ExtraSelection] = []
+        for f_item in findings:
+            start = max(0, min(len(content), int(f_item.get("start", 0))))
+            end = max(start, min(len(content), int(f_item.get("end", start))))
+            if end <= start:
+                continue
+            cursor = QTextCursor(doc)
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+            fmt = QTextCharFormat()
+            if f_item.get("severity") == "medium":
+                fmt.setBackground(QColor(255, 180, 100))
+                fmt.setUnderlineStyle(QTextCharFormat.UnderlineStyle.WaveUnderline)
+                fmt.setUnderlineColor(QColor(220, 80, 20))
+            else:
+                fmt.setBackground(QColor(255, 230, 160))
+                fmt.setUnderlineStyle(QTextCharFormat.UnderlineStyle.WaveUnderline)
+                fmt.setUnderlineColor(QColor(180, 140, 40))
+            fmt.setToolTip(f"{f_item.get('wrong', '')} → {f_item.get('suggestion', '')}")
+            sel = QTextEdit.ExtraSelection()
+            sel.cursor = cursor
+            sel.format = fmt
+            selections.append(sel)
+        self.content_editor.setExtraSelections(selections)
+
+    def _clear_correction_highlights(self) -> None:
+        if hasattr(self, "content_editor") and self.content_editor:
+            self.content_editor.setExtraSelections([])
+
+    def _auto_format_content(self) -> None:
+        if self.state.editor_scope_kind != "chapter" or not hasattr(self, "content_editor"):
+            return
+        text = self.content_editor.toPlainText()
+        if not text.strip():
+            return
+        text = re.sub(r"([a-zA-Z0-9]+)([\u4e00-\u9fff])", r"\1 \2", text)
+        text = re.sub(r"([\u4e00-\u9fff])([a-zA-Z0-9]+)", r"\1 \2", text)
+        text = re.sub(r",", "，", text)
+        text = re.sub(r"(?<!\d)\.(?!\d)", "。", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        self.content_editor.setPlainText(text)
+        self.state.editor_dirty = True
+        self.save_label.setText("未保存")
+        self._set_status("已排版（中英文空格、全角标点、多余空行清理）")
+
+    def _show_polish_diff_dialog(self, job: dict[str, Any]) -> None:
+        original = str(job.get("base_content", ""))
+        polished = self.content_editor.toPlainText()
+        target_chapter_id = job.get("target_chapter_id")
+        dialog = QDialog(self)
+        dialog.setWindowTitle("润色结果对照")
+        dialog.resize(900, 600)
+        layout = QVBoxLayout(dialog)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_label = QLabel("原文")
+        left_label.setObjectName("MetaLabel")
+        left_layout.addWidget(left_label)
+        left_editor = QPlainTextEdit()
+        left_editor.setReadOnly(True)
+        left_editor.setPlainText(original)
+        left_layout.addWidget(left_editor)
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_label = QLabel("润色后")
+        right_label.setObjectName("MetaLabel")
+        right_layout.addWidget(right_label)
+        right_editor = QPlainTextEdit()
+        right_editor.setPlainText(polished)
+        right_layout.addWidget(right_editor)
+        splitter.addWidget(left_widget)
+        splitter.addWidget(right_widget)
+        layout.addWidget(splitter)
+        buttons = QHBoxLayout()
+        accept_btn = QPushButton("接受润色")
+        accept_btn.setObjectName("PrimaryButton")
+        reject_btn = QPushButton("拒绝，恢复原文")
+        reject_btn.setObjectName("DangerButton")
+        manual_btn = QPushButton("在编辑器中手动调整")
+        buttons.addWidget(accept_btn)
+        buttons.addWidget(reject_btn)
+        buttons.addWidget(manual_btn)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+        result = {"action": "manual"}
+
+        def on_accept() -> None:
+            result["action"] = "accept"
+            dialog.accept()
+
+        def on_reject() -> None:
+            if confirm(dialog, "恢复原文", "确定放弃润色结果，恢复为原文吗？"):
+                result["action"] = "reject"
+                dialog.accept()
+
+        def on_manual() -> None:
+            dialog.accept()
+
+        accept_btn.clicked.connect(on_accept)
+        reject_btn.clicked.connect(on_reject)
+        manual_btn.clicked.connect(on_manual)
+        dialog.exec()
+        action = result["action"]
+        if action == "accept":
+            if target_chapter_id:
+                self.content_editor.setPlainText(polished)
+                self.state.editor_dirty = True
+                self.save_label.setText("未保存")
+            self._set_status("已接受润色结果")
+        elif action == "reject":
+            self.content_editor.setPlainText(original)
+            self.state.editor_dirty = True
+            self.save_label.setText("未保存")
+            self._set_status("已恢复原文")
+        else:
+            self.state.editor_dirty = True
+            self.save_label.setText("未保存")
+            self._set_status("润色结果已加载到编辑器，可手动调整")
+
     def _update_word_count(self) -> None:
         if self.state.editor_scope_kind == "chapter":
-            text = self.content_editor.toPlainText()
+            if hasattr(self, "content_editor") and self.content_editor.isVisible():
+                text = self.content_editor.toPlainText()
+            elif hasattr(self, "outline_editor"):
+                text = self.outline_editor.toPlainText()
+            else:
+                self.word_label.setText("字数 0")
+                return
         else:
             text = self.outline_editor.toPlainText()
         self.word_label.setText(f"字数 {len(text.strip())}")
@@ -2305,6 +3051,12 @@ class NovelQtMainWindow(QMainWindow):
             export_menu.addAction("TXT", lambda: self._export_book("txt", node_id))
             export_menu.addAction("Markdown", lambda: self._export_book("md", node_id))
             export_menu.addAction("DOCX", lambda: self._export_book("docx", node_id))
+            export_menu.addSeparator()
+            export_menu.addAction("仅正文 TXT", lambda: self._export_book_part("content", node_id))
+            export_menu.addAction("仅大纲 TXT", lambda: self._export_book_part("outline", node_id))
+            export_menu.addAction("仅人物卡 TXT", lambda: self._export_book_part("characters", node_id))
+            export_menu.addAction("仅世界观 TXT", lambda: self._export_book_part("world", node_id))
+            export_menu.addAction("按卷分文件 TXT", lambda: self._export_book_part("per_volume", node_id))
         elif kind == "volume" and node_id is not None:
             volume = self.database.get_volume(node_id)
             if volume:
@@ -2313,9 +3065,6 @@ class NovelQtMainWindow(QMainWindow):
                 menu.addSeparator()
                 menu.addAction("重命名卷", lambda: self._rename_volume(node_id))
                 menu.addAction("删除卷", lambda: self._delete_volume(node_id))
-                menu.addSeparator()
-                menu.addAction("上移卷", lambda: self._move_volume(node_id, -1))
-                menu.addAction("下移卷", lambda: self._move_volume(node_id, 1))
         elif kind == "group" and group_book_id is not None:
             menu.addAction("新建未分卷章节", lambda: self._create_chapter(group_book_id, None))
         elif kind == "chapter" and node_id is not None:
@@ -2333,10 +3082,8 @@ class NovelQtMainWindow(QMainWindow):
                 menu.addAction("设为对照模板", lambda: self._toggle_chapter_template(node_id, True))
             menu.addSeparator()
             menu.addAction("重命名章节", lambda: self._rename_chapter(node_id))
+            menu.addAction("移动到卷…", lambda: self._move_chapter_to_volume(node_id))
             menu.addAction("删除章节", lambda: self._delete_chapter(node_id))
-            menu.addSeparator()
-            menu.addAction("上移章节", lambda: self._move_chapter(node_id, -1))
-            menu.addAction("下移章节", lambda: self._move_chapter(node_id, 1))
         menu.exec(self.library_tree.viewport().mapToGlobal(pos))
 
     def _toggle_chapter_template(self, chapter_id: int, enabled: bool) -> None:
@@ -2950,6 +3697,45 @@ class NovelQtMainWindow(QMainWindow):
             self._load_library_tree(key)
             self._activate_tree_key(key)
 
+    def _move_chapter_to_volume(self, chapter_id: int) -> None:
+        chapter = self.database.get_chapter(chapter_id)
+        if not chapter:
+            return
+        book_id = int(chapter["book_id"])
+        volumes = self.database.list_volumes(book_id)
+        current_volume_id = chapter["volume_id"]
+        volume_labels = []
+        volume_ids = []
+        for idx, vol in enumerate(volumes, start=1):
+            label = f"第{idx}卷 · {vol['title']}"
+            volume_labels.append(label)
+            volume_ids.append(int(vol["id"]))
+        if not volume_labels:
+            info(self, "提示", "当前书籍没有卷，请先创建卷。")
+            return
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle("移动到卷")
+        dialog.setLabelText("选择目标卷：")
+        dialog.setComboBoxItems(volume_labels)
+        dialog.setComboBoxEditable(False)
+        if not dialog.exec():
+            return
+        selected_label = dialog.textValue()
+        if not selected_label:
+            return
+        try:
+            idx = volume_labels.index(selected_label)
+            target_volume_id = volume_ids[idx]
+        except ValueError:
+            return
+        if target_volume_id == current_volume_id:
+            return
+        self.database.update_chapter_volume(chapter_id, target_volume_id)
+        key = ("chapter", chapter_id, None)
+        self._load_library_tree(key)
+        self._activate_tree_key(key)
+        self._set_status("章节已移动到目标卷")
+
     def _refresh_drawer(self) -> None:
         book_id = self.state.selected_book_id
         if not book_id:
@@ -2977,14 +3763,16 @@ class NovelQtMainWindow(QMainWindow):
         self._load_book_side_data(book_id)
         self._sync_star_tab_visibility()
         self._sync_overview_tab_visibility()
+        self._sync_shortcuts_tab_visibility()
         self._sync_outline_tab_for_level()
         self._refresh_overview()
-        self._drawer_tabs_stale = {"outline", "characters", "star", "world", "skills", "review", "tasks"}
+        self._drawer_tabs_stale = {"outline", "characters", "star", "world", "skills", "shortcuts", "review", "tasks"}
         self._refresh_visible_drawer_tab()
 
     def _on_drawer_tab_changed(self) -> None:
         self._sync_star_tab_visibility()
         self._sync_overview_tab_visibility()
+        self._sync_shortcuts_tab_visibility()
         self._sync_outline_tab_for_level()
         self._update_drawer_title()
         self._refresh_visible_drawer_tab()
@@ -3013,6 +3801,8 @@ class NovelQtMainWindow(QMainWindow):
             self._refresh_skills()
         elif key == "review":
             self._refresh_review_tab()
+        elif key == "shortcuts":
+            self._refresh_shortcuts_list()
 
     def _is_book_level_selected(self) -> bool:
         return bool(self.state.selected_book_id and self.state.current_node_kind == "book")
@@ -3034,6 +3824,17 @@ class NovelQtMainWindow(QMainWindow):
             return
         visible = self._is_book_level_selected()
         self._set_tab_visible(index, visible, fallback_key="outline")
+
+    def _sync_shortcuts_tab_visibility(self) -> None:
+        if not hasattr(self, "drawer_tabs"):
+            return
+        index = self.drawer_tab_indexes.get("shortcuts")
+        if index is None:
+            return
+        visible = self._is_book_level_selected()
+        self._set_tab_visible(index, visible, fallback_key="outline")
+        if visible and self.state.selected_book_id:
+            self._refresh_shortcuts_list()
 
     def _sync_outline_tab_for_level(self) -> None:
         if not hasattr(self, "outline_tab_title"):
@@ -3172,6 +3973,43 @@ class NovelQtMainWindow(QMainWindow):
         book_outline = str(book["outline_text"] or "")
         characters = [dict(item) for item in self.database.list_characters(book_id)]
         world_entries = [dict(item) for item in self.database.list_world_entries(book_id)]
+
+        if len(characters) > 20:
+            dialog = QDialog(self)
+            dialog.setWindowTitle("选择分析人物")
+            dialog.resize(400, 500)
+            layout = QVBoxLayout(dialog)
+            layout.addWidget(QLabel(f"全书分析共有 {len(characters)} 个人物，请选择要分析的人物："))
+            list_widget = QListWidget()
+            list_widget.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
+            all_items = []
+            for ch in characters:
+                item = QListWidgetItem(f"{ch.get('name', '')}  [{ch.get('role', '未设定')}]")
+                item.setData(Qt.ItemDataRole.UserRole, ch)
+                item.setSelected(True)
+                list_widget.addItem(item)
+                all_items.append(item)
+            layout.addWidget(list_widget)
+            btn_layout = QHBoxLayout()
+            select_all = QPushButton("全选")
+            deselect_all = QPushButton("反选")
+            ok_btn = QPushButton("确定")
+            cancel_btn = QPushButton("取消")
+            select_all.clicked.connect(lambda: [it.setSelected(True) for it in all_items])
+            deselect_all.clicked.connect(lambda: [it.setSelected(not it.isSelected()) for it in all_items])
+            btn_layout.addWidget(select_all)
+            btn_layout.addWidget(deselect_all)
+            btn_layout.addStretch(1)
+            btn_layout.addWidget(ok_btn)
+            btn_layout.addWidget(cancel_btn)
+            layout.addLayout(btn_layout)
+            ok_btn.clicked.connect(dialog.accept)
+            cancel_btn.clicked.connect(dialog.reject)
+            if not dialog.exec():
+                return
+            characters = [it.data(Qt.ItemDataRole.UserRole) for it in all_items if it.isSelected()]
+            if not characters:
+                return
         self._open_drawer("tasks")
         self._append_task_log(f"AI 总结全书开始：《{book_title}》，{len(chapters)} 个章节。")
 
@@ -3200,6 +4038,101 @@ class NovelQtMainWindow(QMainWindow):
             callback_uses_log=True,
             callback_uses_cancel=True,
         )
+
+    def _refresh_shortcuts_list(self) -> None:
+        if not hasattr(self, "shortcuts_list"):
+            return
+        self.shortcuts_list.clear()
+        if not self.state.selected_book_id:
+            return
+        rows = self.database.list_name_shortcuts(self.state.selected_book_id)
+        for row in rows:
+            item = QListWidgetItem(f"{row['key_seq']}  →  「{row['character_name']}」")
+            item.setData(Qt.ItemDataRole.UserRole, int(row["id"]))
+            self.shortcuts_list.addItem(item)
+        self._register_name_shortcuts()
+
+    def _register_name_shortcuts(self) -> None:
+        self._unregister_name_shortcuts()
+        if not self.state.selected_book_id:
+            return
+        rows = self.database.list_name_shortcuts(self.state.selected_book_id)
+        for row in rows:
+            key_seq = str(row["key_seq"]).strip()
+            character_name = str(row["character_name"]).strip()
+            if not key_seq or not character_name:
+                continue
+            try:
+                shortcut = QShortcut(QKeySequence(key_seq), self)
+                shortcut.activated.connect(self._make_insert_name_handler(character_name))
+                self._cs_name_shortcut_objects.append(shortcut)
+            except Exception:
+                pass
+
+    def _unregister_name_shortcuts(self) -> None:
+        if not hasattr(self, "_cs_name_shortcut_objects"):
+            self._cs_name_shortcut_objects: list[QShortcut] = []
+            return
+        for sc in self._cs_name_shortcut_objects:
+            sc.setEnabled(False)
+            sc.deleteLater()
+        self._cs_name_shortcut_objects.clear()
+
+    def _make_insert_name_handler(self, name: str):
+        def handler() -> None:
+            editor = getattr(self, "content_editor", None)
+            if editor is None or not editor.isVisible():
+                return
+            cursor = editor.textCursor()
+            cursor.insertText(name)
+            editor.setTextCursor(cursor)
+            editor.setFocus()
+        return handler
+
+    def _add_name_shortcut(self) -> None:
+        if not self.state.selected_book_id:
+            info(self, "提示", "请先选择一本书。")
+            return
+        key_seq = self.shortcut_key_input.text().strip()
+        character_name = self.shortcut_name_input.text().strip()
+        if not key_seq or not character_name:
+            info(self, "提示", "请输入快捷键和人名。")
+            return
+        self.database.add_name_shortcut(self.state.selected_book_id, key_seq, character_name)
+        self.shortcut_key_input.clear()
+        self.shortcut_name_input.clear()
+        self._refresh_shortcuts_list()
+
+    def _delete_name_shortcut(self) -> None:
+        current = self.shortcuts_list.currentItem()
+        if not current:
+            info(self, "提示", "请先选择一条快捷键。")
+            return
+        shortcut_id = current.data(Qt.ItemDataRole.UserRole)
+        if shortcut_id is None:
+            return
+        self.database.delete_name_shortcut(int(shortcut_id))
+        self._refresh_shortcuts_list()
+
+    def _pick_characters_for_shortcuts(self) -> None:
+        if not self.state.selected_book_id:
+            info(self, "提示", "请先选择一本书。")
+            return
+        characters = [dict(item) for item in self.database.list_characters(self.state.selected_book_id)]
+        if not characters:
+            info(self, "提示", "当前书籍还没有人物，请先在人物面板创建。")
+            return
+        names = [str(ch.get("name", "")).strip() for ch in characters if str(ch.get("name", "")).strip()]
+        if not names:
+            return
+        name, ok = QInputDialog.getItem(self, "选取人物", "选择要添加快捷键的人物：", names, 0, False)
+        if not ok or not name:
+            return
+        key_seq, ok2 = QInputDialog.getText(self, "设置快捷键", f"为「{name}」设置快捷键（如 Ctrl+D）：", text="")
+        if not ok2 or not key_seq.strip():
+            return
+        self.database.add_name_shortcut(self.state.selected_book_id, key_seq.strip(), name)
+        self._refresh_shortcuts_list()
 
     def _refresh_overview(self) -> None:
         if not self.state.selected_book_id:
@@ -3386,11 +4319,23 @@ class NovelQtMainWindow(QMainWindow):
     def _refresh_world(self) -> None:
         selected_id = self.selected_world_entry_id
         form_dirty = bool(getattr(self, "_world_form_dirty", False))
+        self._filter_world_list(restore_selection=(selected_id, form_dirty, selected_id))
+
+    def _filter_world_list(self, restore_selection: tuple | None = None) -> None:
+        if not hasattr(self, "world_search") or not hasattr(self, "world_list"):
+            return
+        query = self.world_search.text().strip().lower() if hasattr(self, "world_search") else ""
         target_item: QListWidgetItem | None = None
+        selected_id = restore_selection[0] if restore_selection else self.selected_world_entry_id
+        form_dirty = restore_selection[1] if restore_selection else bool(getattr(self, "_world_form_dirty", False))
         self.world_list.blockSignals(True)
         self.world_list.clear()
         for item in self.world_entries:
-            list_item = QListWidgetItem(f"{item.get('name', '')} [{item.get('category', '') or '设定'}]")
+            name = str(item.get("name", ""))
+            category = str(item.get("category", "") or "设定")
+            if query and query not in name.lower() and query not in category.lower():
+                continue
+            list_item = QListWidgetItem(f"{name} [{category}]")
             list_item.setData(Qt.ItemDataRole.UserRole, int(item["id"]))
             self.world_list.addItem(list_item)
             if selected_id is not None and int(item["id"]) == selected_id:
@@ -4057,7 +5002,6 @@ class NovelQtMainWindow(QMainWindow):
             or "当前书籍"
         )
         title = f"{tab_label} · {subject}" if subject else tab_label
-        self.drawer.setWindowTitle(title)
         if hasattr(self, "drawer_title_label"):
             self.drawer_title_label.setText(title)
 
@@ -4083,14 +5027,33 @@ class NovelQtMainWindow(QMainWindow):
             self._set_drawer_tab("outline")
         self._update_drawer_title()
         self.drawer.setMinimumWidth(drawer_min_width)
-        self.drawer.show()
-        self.resizeDocks([self.drawer], [desired_width], Qt.Orientation.Horizontal)
-        self.drawer.raise_()
+        self.drawer.setVisible(True)
+        self.drawer.setFixedWidth(desired_width)
         self._refresh_drawer()
 
-    def _on_drawer_visibility_changed(self, visible: bool) -> None:
-        if visible:
+    def _hide_drawer(self) -> None:
+        if hasattr(self, "drawer") and self.drawer.isVisible():
             self.qt_drawer_width = max(320, self.drawer.width())
+        self.drawer.setVisible(False)
+
+    def _preserve_workspace_width_for_drawer(self) -> None:
+        if not hasattr(self, "main_splitter"):
+            return
+        sizes = self.main_splitter.sizes()
+        if len(sizes) < 2:
+            return
+        min_workspace = 640
+        if sizes[1] >= min_workspace:
+            self._apply_responsive_chrome()
+            return
+        total = max(1, sum(sizes))
+        left_width = max(76, total - min_workspace)
+        if left_width <= self.library_auto_collapse_width:
+            self.library_collapsed = True
+            self._apply_library_collapsed_state()
+        else:
+            self.library_width = max(180, min(left_width, self.library_width))
+            self.main_splitter.setSizes([left_width, max(min_workspace, total - left_width)])
         self._apply_responsive_chrome()
 
     def _toggle_library_collapsed(self) -> None:
@@ -4120,18 +5083,14 @@ class NovelQtMainWindow(QMainWindow):
                 self.library_create_button.setVisible(False)
                 if hasattr(self, "library_generate_button"):
                     self.library_generate_button.setVisible(False)
-                if hasattr(self, "library_settings_button"):
-                    self.library_settings_button.setVisible(False)
+                if hasattr(self, "library_skills_button"):
+                    self.library_skills_button.setVisible(False)
                 self.collapse_button.setText(">")
                 self.collapse_button.setToolTip("展开导航")
                 self.collapse_button.setFixedWidth(42)
                 self.library_tree.setVisible(False)
                 self.library_compact_list.setVisible(True)
                 self.library_compact_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-                if hasattr(self, "library_history_list"):
-                    self.library_history_list.setVisible(False)
-                if hasattr(self, "library_history_label"):
-                    self.library_history_label.setVisible(False)
             else:
                 if can_resize:
                     self.main_splitter.setSizes([self.library_width, max(800, sizes[1])])
@@ -4143,18 +5102,14 @@ class NovelQtMainWindow(QMainWindow):
                 self.library_create_button.setVisible(True)
                 if hasattr(self, "library_generate_button"):
                     self.library_generate_button.setVisible(True)
-                if hasattr(self, "library_settings_button"):
-                    self.library_settings_button.setVisible(True)
+                if hasattr(self, "library_skills_button"):
+                    self.library_skills_button.setVisible(True)
                 self.collapse_button.setText("收起")
                 self.collapse_button.setToolTip("")
                 self.collapse_button.setMinimumWidth(0)
                 self.collapse_button.setMaximumWidth(16777215)
                 self.library_tree.setVisible(True)
                 self.library_compact_list.setVisible(False)
-                if hasattr(self, "library_history_list"):
-                    self.library_history_list.setVisible(True)
-                if hasattr(self, "library_history_label"):
-                    self.library_history_label.setVisible(True)
         finally:
             self._applying_library_layout = False
 
@@ -4182,25 +5137,16 @@ class NovelQtMainWindow(QMainWindow):
         self._save_ui_settings()
 
     def _apply_responsive_chrome(self) -> None:
-        window_width = self.width()
-        workspace_width = self.workspace_panel.width() if hasattr(self, "workspace_panel") else window_width
+        workspace_width = self.workspace_panel.width() if hasattr(self, "workspace_panel") else self.width()
         if hasattr(self, "title_label"):
             self.title_label.setVisible(False)
-        if hasattr(self, "toolbar_buttons"):
-            for button in self.toolbar_buttons:
-                text = button.text()
-                button.setVisible(window_width >= 1100 or text.startswith(("编辑", "AI")))
         if hasattr(self, "input_stats_card"):
             self.input_stats_card.setVisible(workspace_width >= 820)
-        if hasattr(self, "inline_details_button"):
-            compact_workspace = workspace_width < 680
-            self.inline_details_button.setVisible(not compact_workspace)
-            self.inline_tasks_button.setVisible(not compact_workspace)
         if hasattr(self, "ai_quick_bar"):
-            self.ai_quick_bar.setVisible(workspace_width >= 480)
+            self.ai_quick_bar.setVisible(True)
         if hasattr(self, "ai_quick_buttons"):
-            for index, button in enumerate(self.ai_quick_buttons):
-                button.setVisible(workspace_width >= 720 or index < 2)
+            for button in self.ai_quick_buttons:
+                button.setVisible(True)
 
     def _toggle_focus_mode(self) -> None:
         if self.state.current_node_kind != "chapter":
@@ -4213,7 +5159,7 @@ class NovelQtMainWindow(QMainWindow):
             self.focus_mode = False
             self._set_status("已退出专注写作。")
             return
-        self.drawer.hide()
+        self._hide_drawer()
         self.main_splitter.setSizes([72, max(900, workspace_width)])
         self.focus_mode = True
         self._set_status("已进入专注写作；拖动分隔条或点击视图菜单可恢复。")
@@ -4221,9 +5167,70 @@ class NovelQtMainWindow(QMainWindow):
     def _set_status(self, message: str) -> None:
         if not message:
             return
-        self.status_label.setText(message)
+        text = str(message)
+        self.status_label.setToolTip(text)
+        if len(text) > 120:
+            text = text[:117] + "..."
+        self.status_label.setText(text)
         if hasattr(self, "_status_fade_timer"):
             self._status_fade_timer.start(5000)
+
+    def _toggle_correction_ai_detection(self, checked: bool) -> None:
+        self.correction_ai_enabled = bool(checked)
+        self._save_ui_settings()
+        self._set_status("纠错 AI 检测已启用" if self.correction_ai_enabled else "纠错 AI 检测已关闭")
+
+    def _toggle_auto_save(self, checked: bool) -> None:
+        self.auto_save_enabled = bool(checked)
+        self._sync_auto_save_timer()
+        self._save_ui_settings()
+        self._set_status("定时保存已启用" if self.auto_save_enabled else "定时保存已关闭")
+
+    def _auto_save_interval_action_text(self) -> str:
+        return f"定时保存间隔：{int(self.auto_save_interval_seconds)} 秒"
+
+    def _configure_auto_save_interval(self) -> None:
+        seconds, accepted = QInputDialog.getInt(
+            self,
+            "定时保存",
+            "每几秒自动保存当前章节正文：",
+            int(self.auto_save_interval_seconds),
+            5,
+            3600,
+            5,
+        )
+        if not accepted:
+            return
+        self.auto_save_interval_seconds = int(seconds)
+        self.auto_save_enabled = True
+        if hasattr(self, "auto_save_action"):
+            self.auto_save_action.setChecked(True)
+        if hasattr(self, "auto_save_interval_action"):
+            self.auto_save_interval_action.setText(self._auto_save_interval_action_text())
+        self._sync_auto_save_timer()
+        self._save_ui_settings()
+        self._set_status(f"定时保存已设置为每 {self.auto_save_interval_seconds} 秒")
+
+    def _sync_auto_save_timer(self) -> None:
+        if not hasattr(self, "auto_save_timer"):
+            return
+        self.auto_save_timer.stop()
+        if self.auto_save_enabled:
+            self.auto_save_timer.start(max(5, int(self.auto_save_interval_seconds)) * 1000)
+        if hasattr(self, "auto_save_action"):
+            self.auto_save_action.setChecked(self.auto_save_enabled)
+        if hasattr(self, "auto_save_interval_action"):
+            self.auto_save_interval_action.setText(self._auto_save_interval_action_text())
+
+    def _auto_save_current(self) -> None:
+        if not self.auto_save_enabled or not self.state.editor_dirty:
+            return
+        if self.state.editor_scope_kind != "chapter" or not self.state.selected_chapter_id:
+            return
+        if self._has_active_write_job(int(self.state.selected_chapter_id), {"content", "outline"}):
+            return
+        if self._save_current():
+            self._set_status("已自动保存")
 
     def _open_ai_chat(self) -> None:
         ai_service = self._require_ai_service("chat", "AI 对话")
@@ -4357,25 +5364,6 @@ class NovelQtMainWindow(QMainWindow):
         previous.sort(key=lambda x: x["sort_order"])
         return previous[-limit:]
 
-    def _resolve_long_generation_target(self, anchor_chapter: dict[str, Any]) -> dict[str, Any] | None:
-        book_id = int(anchor_chapter["book_id"])
-        anchor_id = int(anchor_chapter["id"])
-        chapters = [dict(item) for item in self.database.list_chapters(book_id)]
-        next_row: dict[str, Any] | None = None
-        for index, row in enumerate(chapters):
-            if int(row["id"]) == anchor_id and index + 1 < len(chapters):
-                next_row = chapters[index + 1]
-                break
-        if next_row is None:
-            next_index = len(chapters) + 1
-            title = f"第{next_index}章"
-            new_id = self.database.create_chapter_after(anchor_id, title)
-            self._load_library_tree(self.current_tree_key)
-            next_chapter = self.database.get_chapter(new_id)
-            return dict(next_chapter) if next_chapter else None
-        next_chapter = self.database.get_chapter(int(next_row["id"]))
-        return dict(next_chapter) if next_chapter else None
-
     def _start_multi_agent_generation(self) -> None:
         if not self.state.selected_chapter_id:
             info(self, "提示", "请先选择一个章节。")
@@ -4385,13 +5373,12 @@ class NovelQtMainWindow(QMainWindow):
         anchor_chapter = self.database.get_chapter(self.state.selected_chapter_id)
         if not anchor_chapter:
             return
-        chapter = self._resolve_long_generation_target(dict(anchor_chapter))
-        if not chapter:
-            info(self, "长篇生成", "无法定位或创建下一章。")
-            return
-        target_chapter_id = int(chapter["id"])
-        if self._has_active_write_job(target_chapter_id):
-            info(self, "任务运行中", "下一章已有写入型 AI 任务在运行，请等待它完成或先停止任务。")
+        anchor = dict(anchor_chapter)
+        anchor_outline = str(anchor["outline"] or self.chapter_outline_editor.toPlainText()).strip()
+        anchor_content = str(anchor["content"] or self.content_editor.toPlainText()).strip()
+        has_existing_content = bool(anchor_content)
+        if not has_existing_content and not anchor_outline:
+            info(self, "提示", "请先为当前章节写入大纲，再启动长篇生成。")
             return
         if self._find_active_background_job("长篇生成"):
             info(self, "任务运行中", "长篇生成已经在运行。")
@@ -4399,29 +5386,48 @@ class NovelQtMainWindow(QMainWindow):
         ai_service = self._require_ai_service("review", "长篇生成")
         if ai_service is None:
             return
-        anchor_outline = str(anchor_chapter["outline"] or self.chapter_outline_editor.toPlainText()).strip()
-        anchor_content = str(anchor_chapter["content"] or self.content_editor.toPlainText()).strip()
-        chapter_outline = (self.chapter_outline_editor.toPlainText().strip() or str(chapter.get("outline", "") or "").strip())
-        outline = str(chapter.get("outline", "") or "").strip() or chapter_outline
-        if not outline:
-            outline = "\n".join(
-                part
-                for part in [
-                    f"生成目标：承接《{anchor_chapter['title']}》之后的剧情，写出下一章《{chapter['title']}》的完整正文。",
-                    f"上一章大纲：{anchor_outline}" if anchor_outline else "",
-                    f"上一章结尾参考：{anchor_content[-1200:]}" if anchor_content else "",
-                ]
-                if part
-            ).strip()
-        current_content = str(chapter["content"] or "").strip()
-        if not outline:
-            info(self, "提示", "请先为当前书籍或当前章节写入大纲，再启动长篇生成。")
+        if self._has_active_write_job(int(anchor["id"])):
+            info(self, "任务运行中", "当前章节已有写入型 AI 任务在运行，请等待它完成或先停止任务。")
             return
-        if not str(chapter["outline"] or "").strip():
-            self.database.update_chapter(target_chapter_id, outline=outline, content=current_content, summary_text="")
-            refreshed = self.database.get_chapter(target_chapter_id)
-            if refreshed:
-                chapter = dict(refreshed)
+
+        if has_existing_content:
+            new_outline = ask_multiline(
+                self,
+                "新章节大纲",
+                "当前章节已有正文。请先写入新章节大纲，长篇生成会在当前章节下方插入新章节并按这份大纲生成正文。",
+                "",
+            )
+            if not new_outline:
+                return
+            title = self._next_chapter_title_for_book(int(anchor["book_id"]))
+            new_id = self._create_chapter_after_current(
+                book_id=int(anchor["book_id"]),
+                after_chapter_id=int(anchor["id"]),
+                title=title,
+                content="",
+                outline=new_outline,
+            )
+            if new_id is None:
+                info(self, "长篇生成", "无法在当前章节后创建新章节。")
+                return
+            target_chapter_id = new_id
+            target_chapter = self.database.get_chapter(target_chapter_id)
+            if not target_chapter:
+                return
+            chapter = dict(target_chapter)
+            current_content = ""
+            target_title = str(chapter["title"])
+            outline = new_outline
+        else:
+            target_chapter_id = int(anchor["id"])
+            chapter = anchor
+            current_content = anchor_content
+            target_title = str(anchor["title"])
+            outline = anchor_outline
+
+        if self._has_active_write_job(target_chapter_id):
+            info(self, "任务运行中", "目标章节已有写入型 AI 任务在运行，请等待它完成或先停止任务。")
+            return
         snapshot_id = self.database.create_snapshot(
             target_chapter_id,
             f"长篇生成前 · {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
@@ -4431,7 +5437,7 @@ class NovelQtMainWindow(QMainWindow):
         target_payload = {
             "chapter_id": target_chapter_id,
             "book_id": int(chapter["book_id"]),
-            "title": str(chapter["title"]),
+            "title": target_title,
             "outline": outline,
             "content": current_content,
             "snapshot_id": snapshot_id,
@@ -4441,8 +5447,8 @@ class NovelQtMainWindow(QMainWindow):
             "previous_chapters": self._get_previous_chapters_context(int(chapter["book_id"]), target_chapter_id, limit=3),
             "sourcebook_context": self._build_sourcebook_context(),
             "rag_context": self._build_rag_context(int(chapter["book_id"]), outline, top_k=5),
-            "anchor_chapter_id": int(anchor_chapter["id"]),
-            "anchor_title": str(anchor_chapter["title"]),
+            "anchor_chapter_id": int(anchor["id"]),
+            "anchor_title": str(anchor["title"]),
         }
         named_characters = self._named_book_characters(int(chapter["book_id"]))
         target_payload["character_names"] = [
@@ -4456,7 +5462,8 @@ class NovelQtMainWindow(QMainWindow):
         )
         self._open_drawer("tasks")
         self._append_task_log(
-            f"长篇生成启动：从《{target_payload['anchor_title']}》往后一章，目标《{target_payload['title']}》，参考前 {len(target_payload['previous_chapters'])} 个章节。"
+            f"长篇生成启动：根据目标大纲生成《{target_payload['title']}》正文，"
+            f"参考前 {len(target_payload['previous_chapters'])} 个章节。"
         )
 
         def work(log: Callable[[str], None], cancel_event: Event | None) -> dict[str, Any]:
@@ -4528,6 +5535,10 @@ class NovelQtMainWindow(QMainWindow):
             callback_uses_cancel=True,
             deliver_result_on_cancel=True,
         )
+
+    def _next_chapter_title_for_book(self, book_id: int) -> str:
+        chapters = self.database.list_chapters(book_id)
+        return f"第{len(chapters) + 1}章"
 
     def _start_generation(self, mode: str) -> None:
         if mode == "draft":
@@ -4913,6 +5924,13 @@ class NovelQtMainWindow(QMainWindow):
             self._append_task_log(f"全书分析结果已写入作品库。处理 {processed} 章，{failed_batches} 批使用本地兜底。")
         else:
             self._append_task_log(f"全书分析结果已写入作品库。处理 {processed or len(chapter_items)} 章。")
+        self._switch_drawer_tab("overview")
+        self._update_word_count()
+
+    def _switch_drawer_tab(self, tab_key: str) -> None:
+        index = self.drawer_tab_indexes.get(tab_key)
+        if index is not None and hasattr(self, "drawer_tabs"):
+            self.drawer_tabs.setCurrentIndex(index)
 
     def _review_current_scope(self) -> None:
         if not self.state.selected_book_id:
@@ -5444,29 +6462,16 @@ class NovelQtMainWindow(QMainWindow):
         content: str = "",
         outline: str = "",
     ) -> int | None:
-        chapters = self.database.list_chapters(book_id)
-        if not chapters:
+        try:
+            chapter_id = self.database.create_chapter_after(
+                after_chapter_id=after_chapter_id,
+                title=title,
+                outline=outline,
+                content=content,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._append_task_log(f"创建插入章节失败：{exc}")
             return None
-        after_sort = 0
-        for row in chapters:
-            ch = dict(row) if not isinstance(row, dict) else row
-            if int(ch["id"]) == after_chapter_id:
-                after_sort = int(ch.get("sort_order", 0) or 0)
-                break
-
-        self.database.execute(
-            "UPDATE chapters SET sort_order = sort_order + 1 WHERE book_id = ? AND sort_order > ?",
-            (book_id, after_sort),
-        )
-        new_sort = after_sort + 1
-        chapter_id = self.database.create_chapter(
-            book_id=book_id,
-            title=title,
-            volume_id=None,
-            sort_order=new_sort,
-            content=content,
-            outline=outline,
-        )
         self._save_chapter_book_title_mapping(chapter_id)
         self._load_library_tree(("chapter", chapter_id, None))
         self._activate_tree_key(("chapter", chapter_id, None))
@@ -5694,10 +6699,19 @@ class NovelQtMainWindow(QMainWindow):
             self._update_task_activity_state()
             self._set_status("AI 任务已停止")
             return
+        mode = str(job.get("mode", ""))
+        if mode == "polish":
+            self._show_polish_diff_dialog(job)
+            self._append_task_log(message)
+            self._update_task_activity_state()
+            return
         self._persist_ai_result_to_target(job)
         self._append_task_log(message)
         self._update_task_activity_state()
         self._set_status(message)
+        target = str(job.get("target", ""))
+        if target == "outline":
+            self._switch_drawer_tab("outline")
 
     def _is_ai_target_selected(self, job: dict[str, Any]) -> bool:
         target_chapter_id = job.get("target_chapter_id")
@@ -6158,7 +7172,6 @@ class NovelQtMainWindow(QMainWindow):
 
         actions = QHBoxLayout()
         import_ref = QPushButton("导入参考书")
-        seed_pool = QPushButton("导入调研池")
         distill = QPushButton("提炼 Skills")
         bind = QPushButton("启用到当前层")
         unbind = QPushButton("停用")
@@ -6168,7 +7181,6 @@ class NovelQtMainWindow(QMainWindow):
         delete_source.setObjectName("DangerButton")
         close = QPushButton("关闭")
         actions.addWidget(import_ref)
-        actions.addWidget(seed_pool)
         actions.addWidget(distill)
         actions.addWidget(bind)
         actions.addWidget(unbind)
@@ -6240,29 +7252,6 @@ class NovelQtMainWindow(QMainWindow):
             self.database.create_reference_source(title=original.stem, source_path=str(target), rights_note="user_imported")
             load_sources()
 
-        def seed_research_pool() -> None:
-            imported = 0
-            for project in GITHUB_RESEARCH_POOL:
-                if self.database.get_reference_source_by_url(str(project["url"])):
-                    continue
-                source_text = render_research_note(project)
-                target = self.database.project_references_dir / f"{project['slug']}_{uuid.uuid4().hex[:8]}.md"
-                target.write_text(source_text, encoding="utf-8")
-                self.database.create_reference_source(
-                    title=str(project["name"]),
-                    author="GitHub",
-                    source_path=str(target),
-                    rights_note="github_project_research",
-                    source_type="github_project",
-                    source_url=str(project["url"]),
-                    source_license=str(project.get("license", "待确认")),
-                    reusable_level=str(project.get("reusable_level", "pattern_only")),
-                    attribution_note=str(project.get("attribution", "")),
-                )
-                imported += 1
-            load_sources()
-            info(dialog, "完成", f"已导入 {imported} 个调研来源。")
-
         def distill_selected() -> None:
             current = sources_list.currentItem()
             if not current:
@@ -6295,6 +7284,7 @@ class NovelQtMainWindow(QMainWindow):
                 skill_list = skills if isinstance(skills, list) else []
                 self.database.replace_skills_for_source(source_id, skill_list)
                 load_skills(source_id)
+                self._switch_drawer_tab("skills")
 
             self._run_background_ai_job(label="Skills 提炼", callback=work, on_done=done)
 
@@ -6370,7 +7360,6 @@ class NovelQtMainWindow(QMainWindow):
         sources_list.currentItemChanged.connect(on_source_changed)
         skills_list.currentItemChanged.connect(on_skill_changed)
         import_ref.clicked.connect(import_reference)
-        seed_pool.clicked.connect(seed_research_pool)
         distill.clicked.connect(distill_selected)
         bind.clicked.connect(bind_selected)
         unbind.clicked.connect(unbind_selected)
@@ -6449,79 +7438,6 @@ class NovelQtMainWindow(QMainWindow):
         close.clicked.connect(dialog.accept)
         dialog.exec()
 
-    def _open_project_learning_dialog(self) -> None:
-        dialog = QDialog(self)
-        dialog.setWindowTitle("项目学习工作台")
-        dialog.resize(820, 680)
-        layout = QVBoxLayout(dialog)
-        form = QFormLayout()
-        title = QLineEdit()
-        url = QLineEdit()
-        license_field = QLineEdit("待确认")
-        reusable = QComboBox()
-        reusable.addItems(["pattern_only", "compatible_code", "blocked"])
-        source_text = QPlainTextEdit()
-        form.addRow("项目名", title)
-        form.addRow("URL", url)
-        form.addRow("License", license_field)
-        form.addRow("复用等级", reusable)
-        layout.addLayout(form)
-        layout.addWidget(source_text, 1)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
-        save_button = buttons.button(QDialogButtonBox.StandardButton.Save)
-        if save_button:
-            save_button.setText("保存并提炼")
-        layout.addWidget(buttons)
-
-        def save_project() -> None:
-            source_title = title.text().strip()
-            text = source_text.toPlainText().strip()
-            if not source_title or not text:
-                info(dialog, "提示", "项目名和说明文本不能为空。")
-                return
-            ai_service = self._require_ai_service("skills", "项目 Skills 提炼")
-            if ai_service is None:
-                return
-            project_url = url.text().strip()
-            license_note = license_field.text().strip() or "待确认"
-            reusable_level = reusable.currentText()
-
-            def work() -> list[dict[str, str]]:
-                return ai_service.distill_project_skills(
-                    source_title=source_title,
-                    source_text=text,
-                    source_url=project_url,
-                    license_note=license_note,
-                    reusable_level=reusable_level,
-                    require_remote=True,
-                )
-
-            def done(skills: Any) -> None:
-                skill_list = skills if isinstance(skills, list) else []
-                target = self.database.project_references_dir / f"{source_title}_{uuid.uuid4().hex[:8]}.md"
-                target.write_text(text, encoding="utf-8")
-                source_id = self.database.create_reference_source(
-                    title=source_title,
-                    author="GitHub",
-                    source_path=str(target),
-                    rights_note="github_project_research",
-                    source_type="github_project",
-                    source_url=project_url,
-                    source_license=license_note,
-                    reusable_level=reusable_level,
-                    attribution_note=f"学习来源：{project_url}",
-                )
-                if skill_list:
-                    self.database.replace_skills_for_source(source_id, skill_list)
-                info(dialog, "完成", f"已登记项目并提炼 {len(skill_list)} 项 Skills。")
-                dialog.accept()
-
-            self._run_background_ai_job(label="项目 Skills 提炼", callback=work, on_done=done)
-
-        buttons.accepted.connect(save_project)
-        buttons.rejected.connect(dialog.reject)
-        dialog.exec()
-
     def _export_current(self, export_type: str) -> None:
         if self.state.current_node_kind == "chapter" and self.state.selected_chapter_id:
             self._export_chapter(export_type, self.state.selected_chapter_id)
@@ -6560,6 +7476,44 @@ class NovelQtMainWindow(QMainWindow):
             error(self, "导出失败", str(exc))
             return
         self._set_status(f"已导出书籍：{output}")
+
+    def _export_book_part(self, part: str, book_id: int | None = None) -> None:
+        book_id = book_id or self.state.selected_book_id
+        if not book_id:
+            info(self, "提示", "请先选择一本书。")
+            return
+        if self.state.editor_dirty and self.state.selected_book_id == book_id and not self._save_current():
+            return
+        book = self.database.get_book(book_id)
+        title = self._safe_filename(str(book["title"]) if book else "novel")
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出作品",
+            f"{title}_{part}.txt",
+            "TXT 文件 (*.txt)",
+        )
+        if not path:
+            return
+        output = self._ensure_output_suffix(Path(path), "txt")
+        try:
+            if part == "content":
+                self.exporter.export_content_only_txt(book_id, output)
+            elif part == "outline":
+                self.exporter.export_outline_only_txt(book_id, output)
+            elif part == "characters":
+                self.exporter.export_characters_only_txt(book_id, output)
+            elif part == "world":
+                self.exporter.export_world_only_txt(book_id, output)
+            elif part == "per_volume":
+                paths = self.exporter.export_per_volume_txt(book_id, output)
+                self._set_status(f"已按卷导出 {len(paths)} 个文件：{output.parent}")
+                return
+            else:
+                return
+        except Exception as exc:
+            error(self, "导出失败", str(exc))
+            return
+        self._set_status(f"已导出：{output}")
 
     def _export_chapter(self, export_type: str, chapter_id: int | None = None) -> None:
         chapter_id = chapter_id or self.state.selected_chapter_id
@@ -6614,6 +7568,13 @@ class NovelQtMainWindow(QMainWindow):
         super().resizeEvent(event)
         width = self.width()
         self._apply_responsive_chrome()
+        if hasattr(self, "background_video_label") and self.background_video_label:
+            self.background_video_label.lower()
+        if hasattr(self, "background_video_view") and self.background_video_view:
+            self._resize_background_video_item()
+            self.background_video_view.lower()
+        if hasattr(self, "root_widget") and self.root_widget:
+            self.root_widget.raise_()
         if not hasattr(self, "main_splitter"):
             return
         if width < 1100 and not self.library_collapsed:
@@ -6690,6 +7651,9 @@ def run_qt_app(database: Database, ai_service: SimpleAIService) -> int:
     _resolve_and_set_app_icon(app)
     _install_exception_popup(app)
     window = NovelQtMainWindow(database, ai_service)
+    app_icon = app.windowIcon()
+    if not app_icon.isNull():
+        window.setWindowIcon(app_icon)
     if os.environ.get("SIMPLE_AI_NOVEL_QT_OFFSCREEN") != "1":
         window.show()
     if os.environ.get("SIMPLE_AI_NOVEL_QT_SMOKE") == "1":
@@ -6700,4 +7664,3 @@ def run_qt_app(database: Database, ai_service: SimpleAIService) -> int:
     except Exception:  # noqa: BLE001
         pass
     return exit_code
-

@@ -1,26 +1,47 @@
-# Simple AI Novel App
+# 灵枢小说生成器
 
 面向长篇小说创作的本地桌面工作台，技术栈 `Python + PyQt6 + SQLite`。
 
+> **最新版本**：灵枢 v1.2 — 重大的更新（2026-05-13）
+
 ## 核心功能
 
-- **作品目录管理**：书籍 / 卷 / 章节三级树形结构，拖拽排序
-- **章节正文编辑**：富文本编辑器，未保存脏标记可视化
-- **大纲体系**：书籍 / 卷 / 章节三级大纲，AI 同步生成
+### 写作与目录
+- **作品目录管理**：书籍 / 卷 / 章节三级树形结构，拖拽排序，右键菜单完整操作
+- **章节正文编辑**：富文本编辑器，未保存脏标记可视化（标题 `●` + 窗口 `*`），AI 快捷操作栏（续写 / 润色 / AI检测 / 审查 / 生成）
+- **大纲体系**：书籍 / 卷 / 章节三级大纲，AI 同步生成，生成卡片按层级自适应
+- **人名快键**：书籍级快捷键自定义（如 `Ctrl+D`），一键插入人物名称
+
+### AI 辅助
 - **AI 辅助写作**：续写、润色、AI 概率检测、全书分析
 - **多智能体生成**：Planner → Writer → Auditor → Reviser 流水线，支持 budget / quality 双预设
 - **多维度审计**：12 维审计框架 + 24 条内置规则 + @DSL 上下文注入 + Pydantic 校验
-- **真相文件系统**：7 份结构化 Markdown 真相文件 + 伏笔追踪
-- **RAG 向量检索**：Qdrant 嵌入式 + 混合检索 + Jina Reranker
-- **人物与世界观设定**：人物卡片、世界观条目编辑，脏检测确认
-- **人物关系星图**：可视化关系网络，时间轴历史，样式自定义
 - **AI 纠正对话**：嵌入式纠错面板，交互式修正
-- **章节快照**：生成 / 审查前自动创建快照，支持恢复
-- **智能导入**：TXT / Markdown / DOCX 文件导入与拆章
-- **多格式导出**：TXT / Markdown / DOCX
 - **Skills 提炼**：从文本中提炼写作技巧
-- **DPAPI 安全存储**：Windows 下 API Key 加密存储
-- **主题系统**：玻璃拟态设计语言，Design Token 驱动
+- **AI 设置按用途分离**：写作生成 / 同步大纲 / AI 概率检测 / 智能导入 / Skills 提炼 / 全书分析 / 多智能体审查生成，未配置对应项则该功能不可执行
+
+### 世界观与人物
+- **人物与世界观设定**：人物卡片、世界观条目编辑，脏检测确认（切换时弹三选一对话框）
+- **人物关系星图**：可视化关系网络，时间轴历史浏览，样式自定义
+- **真相文件系统**：7 份结构化 Markdown 真相文件 + 伏笔追踪
+
+### 检索与审查
+- **RAG 向量检索**：Qdrant 嵌入式 + 混合检索 + Jina Reranker
+- **AI 任务生命周期**：取消机制（`cancel_requested` 标志位），detached 任务池，任务摘要面板（动画展开）
+
+### 智能工具
+- **快捷拼写检查**：Ctrl+Shift+S 启动拼音/混用词检测，定位到行（在/Z-再、的/地/得 等）
+- **智能导入**：TXT / Markdown / DOCX 文件导入与自动拆章
+- **多格式导出**：TXT / Markdown / DOCX（工具栏「导出 ▾」子菜单 + 快捷键 `Ctrl+E` / `Ctrl+Shift+E`）
+- **章节快照**：生成 / 审查前自动创建快照，支持恢复
+
+### 视觉与体验
+- **MP4 视频背景**：支持 .mp4 / .avi / .mkv / .webm 作为动态底层背景
+- **玻璃拟态主题**：Design Token 驱动，滚动条瘦身玻璃化，半透明适配背景图
+- **Ctrl+0 一键重置**：清空全部视图 / AI / 主题 / 背景等配置，恢复默认状态
+- **专注写作模式**：一键隐藏侧边栏，再次点击或展开侧边栏自动退出
+- **6 个快捷操作**：`Ctrl+D` AI检测、`Ctrl+Shift+R` 审查、`Ctrl+Shift+G` 生成、`Ctrl+E` 导出TXT、`Ctrl+Shift+E` 导出DOCX、`Ctrl+L` 折叠导航、`Ctrl+Shift+S` 拼写检查、`Ctrl+0` 重置
+- **DPAPI 安全存储**：Windows 下 API Key 加密存储，不落盘明文
 
 ## 运行
 
@@ -45,8 +66,6 @@ $env:OPENAI_MODEL = "your_model_name"
 python main.py
 ```
 
-AI 设置按用途分离：写作生成、同步大纲、AI 概率检测、智能导入、Skills 提炼、全书分析、多智能体审查 / 生成。未配置对应用途时，该功能不可执行。
-
 ## 检查
 
 ```powershell
@@ -63,9 +82,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\health_check.ps1
 ## 项目结构
 
 ```text
-simple_ai_novel_py/
+灵枢/
 ├── main.py                          # 入口
 ├── requirements.txt                 # 依赖声明
+├── pytest.ini                       # pytest 配置
 ├── novel_app/
 │   ├── ai_service.py                # AI 服务（多用途路由）
 │   ├── model_router.py              # 多模型路由（budget/quality 预设）
@@ -74,6 +94,7 @@ simple_ai_novel_py/
 │   ├── text_importer.py             # 智能导入
 │   ├── secure_storage.py            # DPAPI 安全存储
 │   ├── research_sources.py          # 开源研究素材库
+│   ├── spell_check.py               # 拼音/混用词检测
 │   ├── qt_app.py                    # PyQt6 主窗口
 │   ├── agents/                      # 多智能体编排
 │   │   ├── graph.py                 # AgentGraph 状态图

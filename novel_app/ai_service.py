@@ -414,6 +414,72 @@ class SimpleAIService:
         level = str(payload.get("level", "none")).strip().lower()
         return self._normalize_ai_probability(probability, level)
 
+    def detect_chinese_typos(
+        self,
+        text: str,
+        *,
+        require_remote: bool = False,
+    ) -> list[dict[str, Any]]:
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return []
+        if require_remote:
+            self.require_remote("AI 纠错检测")
+        if not self.is_remote_configured():
+            return []
+        prompt = (
+            "请只检查下面中文小说章节正文中可能存在的错别字，不要评价文风、剧情或语法。\n"
+            "只输出 JSON 数组，不要解释。每项字段：wrong, suggestion, context, confidence。\n"
+            "wrong 必须是原文中连续出现的字或词；suggestion 是建议替换；confidence 为 0-1。\n"
+            "如果没有错别字，输出 []。\n\n"
+            f"章节正文：\n{cleaned[:8000]}"
+        )
+        result = self._post_chat_completion(
+            messages=[
+                {"role": "system", "content": "你是中文小说错别字校对器，只返回 JSON 数组。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.05,
+        )
+        raw_text = result["choices"][0]["message"]["content"].strip()
+        try:
+            payload = self._extract_json_payload(raw_text)
+        except Exception:
+            return []
+        findings: list[dict[str, Any]] = []
+        occupied_starts: set[int] = set()
+        for item in payload[:80]:
+            if not isinstance(item, dict):
+                continue
+            wrong = str(item.get("wrong", "") or "").strip()
+            suggestion = str(item.get("suggestion", "") or "").strip()
+            if not wrong or not suggestion or wrong == suggestion:
+                continue
+            start = cleaned.find(wrong)
+            while start in occupied_starts and start >= 0:
+                start = cleaned.find(wrong, start + len(wrong))
+            if start < 0:
+                continue
+            occupied_starts.add(start)
+            try:
+                confidence = float(item.get("confidence", 0.75) or 0.75)
+            except (TypeError, ValueError):
+                confidence = 0.75
+            findings.append(
+                {
+                    "start": start,
+                    "end": start + len(wrong),
+                    "wrong": wrong,
+                    "suggestion": suggestion,
+                    "severity": "medium" if confidence >= 0.8 else "low",
+                    "dimension": "错别字(AI)",
+                    "rule": "ai_typo_detection",
+                    "confidence": max(0.0, min(1.0, confidence)),
+                }
+            )
+        findings.sort(key=lambda item: int(item["start"]))
+        return findings
+
     @staticmethod
     def _coerce_probability(value: Any) -> int:
         if isinstance(value, (int, float)):
@@ -492,7 +558,14 @@ class SimpleAIService:
         normalized_characters = self._relationship_named_characters(characters)
         if len(normalized_characters) < 2:
             return []
-        self.require_remote("人物关系分析")
+        if not self.is_remote_configured():
+            if require_remote:
+                self.require_remote("人物关系分析")
+            return self._extract_relationships_mock(
+                book_title=book_title,
+                characters=normalized_characters,
+                chapters=chapters,
+            )
         try:
             payload = self._extract_relationships_remote(
                 book_title=book_title,
@@ -504,7 +577,13 @@ class SimpleAIService:
             return self._normalize_relationship_payload(payload, normalized_characters)
         except Exception as exc:
             self._remember_remote_error("人物关系分析", exc)
-            raise
+            if require_remote:
+                raise
+            return self._extract_relationships_mock(
+                book_title=book_title,
+                characters=normalized_characters,
+                chapters=chapters,
+            )
 
     def multi_agent_review(
         self,
@@ -1365,6 +1444,61 @@ class SimpleAIService:
                 }
             )
         return normalized
+
+    def _extract_relationships_mock(
+        self,
+        *,
+        book_title: str,
+        characters: list[dict[str, str]],
+        chapters: list[dict[str, Any]],
+    ) -> list[dict[str, str]]:
+        names = [str(item.get("name", "") or "").strip() for item in characters if str(item.get("name", "") or "").strip()]
+        relationships: list[dict[str, str]] = []
+        seen_pairs: set[tuple[str, str]] = set()
+        type_keywords = [
+            ("敌", "敌对"),
+            ("仇", "敌对"),
+            ("盟", "同盟"),
+            ("合作", "合作"),
+            ("朋友", "同伴"),
+            ("同伴", "同伴"),
+            ("师", "师徒"),
+            ("父", "亲属"),
+            ("母", "亲属"),
+            ("兄", "亲属"),
+            ("妹", "亲属"),
+            ("爱", "情感"),
+        ]
+        for chapter in chapters:
+            content = str(chapter.get("content", "") or "")
+            title = str(chapter.get("title", "") or "章节")
+            paragraphs = [part for part in re.split(r"\n\s*\n+|[。！？!?；;]", content) if part.strip()]
+            for paragraph in paragraphs:
+                mentioned = [name for name in names if name and name in paragraph]
+                if len(mentioned) < 2:
+                    continue
+                relation_type = "关联"
+                for keyword, label in type_keywords:
+                    if keyword in paragraph:
+                        relation_type = label
+                        break
+                for index, source in enumerate(mentioned):
+                    for target in mentioned[index + 1:]:
+                        pair = tuple(sorted((source, target)))
+                        if pair in seen_pairs:
+                            continue
+                        seen_pairs.add(pair)
+                        relationships.append(
+                            {
+                                "source_name": source,
+                                "target_name": target,
+                                "relationship_type": relation_type,
+                                "description": f"本地分析：两人在《{title}》同段落出现。",
+                            }
+                        )
+                        if len(relationships) >= 80:
+                            return relationships
+        return relationships
 
     def _extract_relationships_remote(
         self,

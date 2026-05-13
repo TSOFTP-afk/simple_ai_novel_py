@@ -198,6 +198,26 @@ class DatabaseExtensionTests(unittest.TestCase):
             self.assertEqual(db.resolve_media_path(stored), image)
             db.close()
 
+    def test_create_chapter_after_keeps_volume_and_inserts_outline(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "novels.db")
+            db.initialize()
+            book_id = db.create_book("长篇")
+            volume_id = db.create_volume(book_id, "第一卷")
+            first_id = db.create_chapter(book_id, "第一章", volume_id=volume_id)
+            second_id = db.create_chapter(book_id, "第二章", volume_id=volume_id)
+
+            inserted_id = db.create_chapter_after(first_id, "插入章", outline="新章大纲", content="")
+
+            chapters = db.list_chapters(book_id, volume_id)
+            self.assertEqual([int(row["id"]) for row in chapters], [first_id, inserted_id, second_id])
+            inserted = db.get_chapter(inserted_id)
+            self.assertIsNotNone(inserted)
+            self.assertEqual(int(inserted["volume_id"]), volume_id)
+            self.assertEqual(inserted["outline"], "新章大纲")
+            self.assertEqual(inserted["content"], "")
+            db.close()
+
 
 if __name__ == "__main__":
     unittest.main()

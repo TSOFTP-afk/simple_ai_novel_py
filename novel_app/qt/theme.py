@@ -119,7 +119,7 @@ def _rgba(hex_color: str, alpha: int) -> str:
 def build_stylesheet(tokens: ThemeTokens, background_image: str = "") -> str:
     has_background = bool(background_image)
     window_background = "transparent" if has_background else tokens.bg
-    chrome_background = "transparent" if has_background else tokens.bg
+    chrome_background = tokens.bg
     panel_background = _rgba(tokens.surface, 172) if has_background else tokens.surface
     card_background = _rgba(tokens.surface, 188) if has_background else tokens.surface
     graph_panel_background = _rgba(tokens.editor_bg, 238) if has_background else tokens.editor_bg
@@ -146,7 +146,13 @@ def build_stylesheet(tokens: ThemeTokens, background_image: str = "") -> str:
     QWidget#AppRoot {{
         background: transparent;
     }}
-    QDockWidget, QSplitter, QStackedWidget {{
+    QSplitter, QStackedWidget {{
+        background: transparent;
+    }}
+    QWidget#SideDrawer {{
+        background: transparent;
+    }}
+    QWidget#DrawerPage {{
         background: transparent;
     }}
     """
@@ -171,20 +177,16 @@ def build_stylesheet(tokens: ThemeTokens, background_image: str = "") -> str:
         height: 2px;
     }}
     QDockWidget {{
-        background: transparent;
+        background: {chrome_background};
         border: none;
     }}
     QDockWidget::title {{
         background: transparent;
         padding: 4px;
     }}
-    QDockWidget#SideDrawer {{
+    QFrame#SideDrawer {{
         background: transparent;
         border: none;
-    }}
-    QDockWidget#SideDrawer::title {{
-        background: transparent;
-        padding: 0px;
     }}
     QFrame#DrawerTitleBar {{
         background: {drawer_title_background};
@@ -240,6 +242,12 @@ def build_stylesheet(tokens: ThemeTokens, background_image: str = "") -> str:
         border: none;
         border-radius: 16px;
     }}
+    QFrame#HeaderBar {{
+        min-height: 50px;
+    }}
+    QFrame#StatusBar {{
+        min-height: 30px;
+    }}
     QFrame#Panel {{
         background: {panel_background};
         border: 1px solid {tokens.border};
@@ -283,6 +291,13 @@ def build_stylesheet(tokens: ThemeTokens, background_image: str = "") -> str:
         color: {tokens.muted};
         background: transparent;
     }}
+    QLabel#StatusMetric {{
+        color: {tokens.muted};
+        background: {surface_alt_background};
+        border: 1px solid {tokens.border};
+        border-radius: 10px;
+        padding: 2px 10px;
+    }}
     QLabel#ImagePreview {{
         background: {surface_alt_background};
         color: {tokens.muted};
@@ -318,9 +333,14 @@ def build_stylesheet(tokens: ThemeTokens, background_image: str = "") -> str:
         text-align: left;
         font-weight: 600;
     }}
+    QPushButton#ToolbarButton {{
+        min-height: 32px;
+        padding: 5px 14px;
+        border-radius: 12px;
+    }}
     QPushButton#TinyButton {{
-        min-height: 24px;
-        padding: 3px 8px;
+        min-height: 30px;
+        padding: 4px 10px;
         border-radius: 10px;
         font-size: 9.5pt;
     }}

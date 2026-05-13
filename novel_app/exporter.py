@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -86,7 +87,7 @@ class BookExporter:
                     lines.append(item["content_text"])
                 lines.append("")
 
-        lines.extend(["正文：", "-" * 20, ""])
+        lines.extend(["-" * 40, ""])
         for group in groups:
             if use_volume_headings:
                 lines.append(f"【{group['title']}】")
@@ -127,7 +128,6 @@ class BookExporter:
                     lines.append(item["content_text"])
                     lines.append("")
 
-        lines.extend(["## 正文", ""])
         for group in groups:
             if use_volume_headings:
                 lines.append(f"### {group['title']}")
@@ -159,7 +159,6 @@ class BookExporter:
                 document.add_paragraph(f"分类：{item['category']}")
                 self._append_multiline_paragraphs(document, str(item["content_text"] or ""))
 
-        document.add_heading("正文", level=1)
         groups = self._group_chapters(payload["chapters"])
         use_volume_headings = self._use_volume_headings(payload)
         for group in groups:
@@ -189,7 +188,7 @@ class BookExporter:
             lines.extend([f"第{chapter['sort_order']}章 {chapter['title']}", ""])
         if chapter.get("outline"):
             lines.extend(["大纲：", str(chapter["outline"]).strip(), ""])
-        lines.extend([str(chapter.get("content") or "[暂无正文]").strip(), ""])
+        lines.extend([str(chapter.get("content") or "").strip(), ""])
         return lines
 
     def _chapter_markdown_lines(
@@ -205,7 +204,8 @@ class BookExporter:
             lines.extend([f"{prefix} 第{chapter['sort_order']}章 {chapter['title']}", ""])
         if chapter.get("outline"):
             lines.extend(["### 大纲", "", str(chapter["outline"]).strip(), ""])
-        lines.extend(["### 正文", "", str(chapter.get("content") or "[暂无正文]").strip(), ""])
+        lines.append(str(chapter.get("content") or "").strip())
+        lines.append("")
         return lines
 
     def _append_chapter_docx(self, document, chapter: dict[str, Any], heading_level: int = 2) -> None:
@@ -216,8 +216,7 @@ class BookExporter:
         if chapter.get("outline"):
             document.add_heading("大纲", level=max(1, min(5, heading_level + 1)))
             self._append_multiline_paragraphs(document, str(chapter["outline"]))
-        document.add_heading("正文", level=max(1, min(5, heading_level + 1)))
-        self._append_multiline_paragraphs(document, str(chapter.get("content") or "[暂无正文]"))
+        self._append_multiline_paragraphs(document, str(chapter.get("content") or ""))
 
     def _append_multiline_paragraphs(self, document, text: str) -> None:
         paragraphs = [line.strip() for line in text.splitlines() if line.strip()]
@@ -248,3 +247,68 @@ class BookExporter:
         if payload["volumes"]:
             return True
         return any(chapter["volume_id"] is not None for chapter in payload["chapters"])
+
+    def export_content_only_txt(self, book_id: int, output_path: Path) -> Path:
+        payload = self.database.get_book_export_data(book_id)
+        groups = self._group_chapters(payload["chapters"])
+        lines: list[str] = []
+        for group in groups:
+            for chapter in group["chapters"]:
+                content = str(chapter.get("content") or "").strip()
+                if content:
+                    lines.append(content)
+                    lines.append("")
+        output_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+        return output_path
+
+    def export_outline_only_txt(self, book_id: int, output_path: Path) -> Path:
+        payload = self.database.get_book_export_data(book_id)
+        groups = self._group_chapters(payload["chapters"])
+        lines = [f"# {payload['book']['title']} 大纲", ""]
+        for group in groups:
+            for chapter in group["chapters"]:
+                lines.append(f"## 第{chapter['sort_order']}章 {chapter['title']}")
+                outline = str(chapter.get("outline") or "").strip()
+                if outline:
+                    lines.append(outline)
+                lines.append("")
+        output_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+        return output_path
+
+    def export_characters_only_txt(self, book_id: int, output_path: Path) -> Path:
+        payload = self.database.get_book_export_data(book_id)
+        lines = [f"# {payload['book']['title']} 人物卡", ""]
+        for item in payload["characters"]:
+            lines.append(f"## {item['name']} / {item['role'] or '未设定角色'}")
+            if item["profile_text"]:
+                lines.append(item["profile_text"])
+            lines.append("")
+        output_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+        return output_path
+
+    def export_world_only_txt(self, book_id: int, output_path: Path) -> Path:
+        payload = self.database.get_book_export_data(book_id)
+        lines = [f"# {payload['book']['title']} 世界观", ""]
+        for item in payload["world_entries"]:
+            lines.append(f"## {item['name']} [{item['category']}]")
+            if item["content_text"]:
+                lines.append(item["content_text"])
+            lines.append("")
+        output_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+        return output_path
+
+    def export_per_volume_txt(self, book_id: int, output_path: Path) -> list[Path]:
+        payload = self.database.get_book_export_data(book_id)
+        groups = self._group_chapters(payload["chapters"])
+        paths: list[Path] = []
+        base_name = output_path.stem
+        parent_dir = output_path.parent
+        for group in groups:
+            safe_name = re.sub(r"[\\/:*?\"<>|]", "_", group["title"])
+            vol_path = parent_dir / f"{base_name}_{safe_name}.txt"
+            lines = [f"书名：{payload['book']['title']}", f"# {group['title']}", "=" * 40, ""]
+            for chapter in group["chapters"]:
+                lines.extend(self._chapter_txt_lines(chapter))
+            vol_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+            paths.append(vol_path)
+        return paths

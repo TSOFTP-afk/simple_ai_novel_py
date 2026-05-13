@@ -47,17 +47,34 @@ Copy-Directory (Join-Path $ProjectRoot "vendor") (Join-Path $PayloadApp "vendor"
 $t1 = [Math]::Round($sw.Elapsed.TotalSeconds, 1)
 Write-Output "  App code done (${t1}s)"
 
+$RuntimeRepo = Join-Path $ReleaseRoot "runtime"
 $runtimeSourcePath = ""
+
+function Find-LatestRuntime {
+    if (-not (Test-Path $RuntimeRepo)) { return $null }
+    $dirs = Get-ChildItem $RuntimeRepo -Directory | Where-Object { Test-Path (Join-Path $_.FullName "python\python.exe") }
+    if (-not $dirs) { return $null }
+    return ($dirs | Sort-Object LastWriteTime -Descending | Select-Object -First 1).Name
+}
+
 if ($ReuseRuntimeFrom) {
-    $runtimeSourcePath = Join-Path (Join-Path (Join-Path $ReleaseRoot "runtime") $ReuseRuntimeFrom) "python"
-    if (-not (Test-Path -LiteralPath $runtimeSourcePath)) {
-        Write-Warning "Runtime source not found: $runtimeSourcePath, fallback to system Python."
+    $runtimeSourcePath = Join-Path (Join-Path $RuntimeRepo $ReuseRuntimeFrom) "python"
+    if (-not (Test-Path $runtimeSourcePath)) {
+        Write-Warning "Runtime source not found: $runtimeSourcePath, fallback to latest."
         $runtimeSourcePath = ""
     }
 }
 
+if (-not $runtimeSourcePath) {
+    $latest = Find-LatestRuntime
+    if ($latest) {
+        $runtimeSourcePath = Join-Path (Join-Path $RuntimeRepo $latest) "python"
+        Write-Output "[0] Auto-reusing runtime from runtime/$latest/"
+    }
+}
+
 if ($runtimeSourcePath) {
-    Write-Output "[2/5] Reusing Python runtime from runtime/$ReuseRuntimeFrom/python/..."
+    Write-Output "[2/5] Reusing Python runtime from $runtimeSourcePath..."
     Copy-Directory $runtimeSourcePath $PayloadPython
     $t2 = [Math]::Round($sw.Elapsed.TotalSeconds, 1)
     Write-Output "  Python runtime reused (${t2}s)"

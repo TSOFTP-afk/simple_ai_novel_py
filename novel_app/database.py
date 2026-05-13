@@ -289,6 +289,19 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_node_styles_book ON node_styles(book_id);
             CREATE INDEX IF NOT EXISTS idx_relationship_types_book ON relationship_types(book_id);
+
+            CREATE TABLE IF NOT EXISTS sticky_notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                book_id INTEGER NOT NULL,
+                content TEXT NOT NULL DEFAULT '',
+                color TEXT NOT NULL DEFAULT '#FFF9C4',
+                pos_x INTEGER NOT NULL DEFAULT 100,
+                pos_y INTEGER NOT NULL DEFAULT 100,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_sticky_notes_book ON sticky_notes(book_id);
             """
         )
         self._migrate_schema()
@@ -296,6 +309,45 @@ class Database:
         self._ensure_column("character_relationships", "description", "TEXT NOT NULL DEFAULT ''")
         self._normalize_all_volume_orders()
         self._normalize_all_chapter_orders()
+        self.connection.commit()
+
+    def update_character_pinned(self, character_id: int, pinned: bool) -> None:
+        self.connection.execute(
+            "UPDATE characters SET pinned = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (1 if pinned else 0, character_id),
+        )
+        self.connection.commit()
+
+    def list_sticky_notes(self, book_id: int) -> list[sqlite3.Row]:
+        cursor = self.connection.execute(
+            "SELECT id, book_id, content, color, pos_x, pos_y, created_at FROM sticky_notes WHERE book_id = ? ORDER BY id ASC",
+            (book_id,),
+        )
+        return list(cursor.fetchall())
+
+    def create_sticky_note(self, book_id: int, content: str = "", color: str = "#FFF9C4", pos_x: int = 100, pos_y: int = 100) -> int:
+        cursor = self.connection.execute(
+            "INSERT INTO sticky_notes (book_id, content, color, pos_x, pos_y) VALUES (?, ?, ?, ?, ?)",
+            (book_id, content, color, pos_x, pos_y),
+        )
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def update_sticky_note(self, note_id: int, content: str = "", color: str = "#FFF9C4", pos_x: int | None = None, pos_y: int | None = None) -> None:
+        if pos_x is not None and pos_y is not None:
+            self.connection.execute(
+                "UPDATE sticky_notes SET content = ?, color = ?, pos_x = ?, pos_y = ? WHERE id = ?",
+                (content, color, pos_x, pos_y, note_id),
+            )
+        else:
+            self.connection.execute(
+                "UPDATE sticky_notes SET content = ?, color = ? WHERE id = ?",
+                (content, color, note_id),
+            )
+        self.connection.commit()
+
+    def delete_sticky_note(self, note_id: int) -> None:
+        self.connection.execute("DELETE FROM sticky_notes WHERE id = ?", (note_id,))
         self.connection.commit()
 
     def _migrate_schema(self) -> None:
@@ -335,6 +387,7 @@ class Database:
         self._ensure_column("review_findings", "dimension", "TEXT NOT NULL DEFAULT ''")
         self._ensure_column("review_findings", "conflict_with", "TEXT NOT NULL DEFAULT ''")
         self._ensure_column("review_findings", "is_cross_chapter", "INTEGER NOT NULL DEFAULT 0")
+        self._ensure_column("characters", "pinned", "INTEGER NOT NULL DEFAULT 0")
         self.connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_chapters_volume ON chapters(volume_id, sort_order, id)"
         )
@@ -432,6 +485,17 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_review_runs_book ON review_runs(book_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_review_runs_chapter ON review_runs(chapter_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_review_findings_run ON review_findings(run_id);
+
+            CREATE TABLE IF NOT EXISTS name_shortcuts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                book_id INTEGER NOT NULL,
+                key_seq TEXT NOT NULL DEFAULT '',
+                character_name TEXT NOT NULL DEFAULT '',
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_name_shortcuts_book ON name_shortcuts(book_id);
             """
         )
 
@@ -1698,10 +1762,10 @@ class Database:
     def list_characters(self, book_id: int) -> list[sqlite3.Row]:
         cursor = self.connection.execute(
             """
-            SELECT id, name, role, image_path, graph_x, graph_y
+            SELECT id, name, role, image_path, graph_x, graph_y, pinned
             FROM characters
             WHERE book_id = ?
-            ORDER BY id DESC
+            ORDER BY pinned DESC, id ASC
             """,
             (book_id,),
         )
@@ -1721,7 +1785,7 @@ class Database:
     def get_character(self, character_id: int) -> sqlite3.Row | None:
         cursor = self.connection.execute(
             """
-            SELECT id, book_id, name, role, profile_text, image_path, graph_x, graph_y
+            SELECT id, book_id, name, role, profile_text, image_path, graph_x, graph_y, pinned
             FROM characters
             WHERE id = ?
             """,
@@ -1737,23 +1801,16 @@ class Database:
         profile_text: str,
         image_path: str | None = None,
     ) -> None:
+        pinned = 1 if role in ("男主", "女主") else 0
         if image_path is None:
             self.connection.execute(
-                """
-                UPDATE characters
-                SET name = ?, role = ?, profile_text = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                """,
-                (name, role, profile_text, character_id),
+                "UPDATE characters SET name = ?, role = ?, profile_text = ?, pinned = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (name, role, profile_text, pinned, character_id),
             )
         else:
             self.connection.execute(
-                """
-                UPDATE characters
-                SET name = ?, role = ?, profile_text = ?, image_path = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                """,
-                (name, role, profile_text, image_path, character_id),
+                "UPDATE characters SET name = ?, role = ?, profile_text = ?, image_path = ?, pinned = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (name, role, profile_text, image_path, pinned, character_id),
             )
         self.connection.commit()
 
@@ -1853,7 +1910,13 @@ class Database:
         self.connection.commit()
         return int(cursor.lastrowid)
 
-    def create_chapter_after(self, after_chapter_id: int, title: str) -> int:
+    def create_chapter_after(
+        self,
+        after_chapter_id: int,
+        title: str,
+        outline: str = "",
+        content: str = "",
+    ) -> int:
         current = self.connection.execute(
             """
             SELECT id, book_id, volume_id, sort_order
@@ -1879,10 +1942,10 @@ class Database:
             )
             cursor = self.connection.execute(
                 """
-                INSERT INTO chapters (book_id, volume_id, title, sort_order)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO chapters (book_id, volume_id, title, outline, content, sort_order)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (book_id, volume_id, title, sort_order + 1),
+                (book_id, volume_id, title, outline, content, sort_order + 1),
             )
             new_id = int(cursor.lastrowid)
         self._normalize_chapter_order(book_id, volume_id)
@@ -2023,6 +2086,20 @@ class Database:
         )
         self.connection.commit()
 
+    def count_book_words(self, book_id: int) -> int:
+        row = self.connection.execute(
+            "SELECT COALESCE(SUM(LENGTH(COALESCE(content, ''))), 0) AS total FROM chapters WHERE book_id = ?",
+            (book_id,),
+        ).fetchone()
+        return int(row["total"]) if row else 0
+
+    def count_volume_words(self, volume_id: int) -> int:
+        row = self.connection.execute(
+            "SELECT COALESCE(SUM(LENGTH(COALESCE(content, ''))), 0) AS total FROM chapters WHERE volume_id = ?",
+            (volume_id,),
+        ).fetchone()
+        return int(row["total"]) if row else 0
+
     def get_book_export_data(self, book_id: int) -> dict[str, Any]:
         book = self.get_book(book_id)
         if not book:
@@ -2081,6 +2158,24 @@ class Database:
             "world_entries": [dict(item) for item in world_entries],
             "unassigned_chapter_count": self.count_unassigned_chapters(book_id),
         }
+
+    def list_name_shortcuts(self, book_id: int) -> list[sqlite3.Row]:
+        return self.connection.execute(
+            "SELECT id, book_id, key_seq, character_name FROM name_shortcuts WHERE book_id = ? ORDER BY id ASC",
+            (book_id,),
+        ).fetchall()
+
+    def add_name_shortcut(self, book_id: int, key_seq: str, character_name: str) -> int:
+        cursor = self.connection.execute(
+            "INSERT INTO name_shortcuts (book_id, key_seq, character_name) VALUES (?, ?, ?)",
+            (book_id, key_seq, character_name),
+        )
+        self.connection.commit()
+        return cursor.lastrowid or 0
+
+    def delete_name_shortcut(self, shortcut_id: int) -> None:
+        self.connection.execute("DELETE FROM name_shortcuts WHERE id = ?", (shortcut_id,))
+        self.connection.commit()
 
     def close(self) -> None:
         self.connection.close()
